@@ -8,6 +8,7 @@ import * as THREE from 'three';
 const PEER_RADIUS = 15;
 const TRAFFIC_SPEED = 0.5;
 const PEER_TIMEOUT = 60000; // 1 minute
+const AGENT_CLUSTER_RADIUS = 4; // Radius for multiple agents
 
 // --- Helper: Generate Position on Circle ---
 const getPosition = (index, total) => {
@@ -17,7 +18,7 @@ const getPosition = (index, total) => {
 
 // --- Components ---
 
-function Agent({ label }) {
+function Agent({ label, position }) {
   const groupRef = useRef();
   const coreRef = useRef();
   const shell1Ref = useRef();
@@ -29,7 +30,8 @@ function Agent({ label }) {
 
     // Bobbing
     if (groupRef.current) {
-      groupRef.current.position.y = Math.sin(t * 1) * 0.2 + 2.0;
+      // Use passed position Y + bobbing
+      groupRef.current.position.y = (position?.y || 2.0) + Math.sin(t * 1) * 0.2;
     }
 
     // Core Pulse
@@ -55,7 +57,7 @@ function Agent({ label }) {
   });
 
   return (
-    <group ref={groupRef}>
+    <group ref={groupRef} position={position || [0, 2, 0]}>
       {/* Core Sphere (Glowing) */}
       <mesh ref={coreRef}>
         <sphereGeometry args={[0.8, 32, 32]} />
@@ -99,7 +101,7 @@ function Agent({ label }) {
       </mesh>
 
       <Text position={[0, 2.5, 0]} fontSize={0.5} color="#00ffff" anchorX="center" anchorY="middle">
-        {label || "ME (Agent)"}
+        {label || "Agent"}
       </Text>
     </group>
   );
@@ -447,13 +449,14 @@ import { GrpcWebImpl } from './proto/GrpcWebImpl';
 export default function TrafficVisualizer() {
   // useRefs for data (Source of Truth)
   const peersRef = useRef({});
+  const agentsRef = useRef({}); // Store agents data
   const linksRef = useRef({});
   // const ws = useRef(null); // No longer needed
 
   // State
   const [peersState, setPeersState] = useState({});
+  const [agentsState, setAgentsState] = useState({}); // Renderable agents
   const [linksState, setLinksState] = useState({});
-  const [agentIP, setAgentIP] = useState(null);
   const [despawnEffects, setDespawnEffects] = useState([]);
 
   // Interaction State
@@ -500,25 +503,38 @@ export default function TrafficVisualizer() {
 
           const timestamp = Date.now();
 
-          // Identity Check
+          // Identity Check - Agents
           const isLoopback = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
-          const updateAgentIP = (newIP) => {
-            if (!newIP) return;
-            setAgentIP(currentIP => {
-              if (currentIP && !isLoopback(currentIP) && isLoopback(newIP)) return currentIP;
-              return newIP;
-            });
+
+          const registerAgent = (ip) => {
+            if (!ip || isLoopback(ip) || ip === "AGENT") return; // Ignore local references if they come across
+            // NOTE: Server usually sends real IP. If "127.0.0.1" comes as agent IP, we might want to ignore or handle specially?
+            // For now, accept all src_is_agent tagged IPs unless they are strictly loopback which might be noise
+            // Actually, if agent reports as 127.0.0.1 (e.g. running locally), we should display it.
+            // But let's avoid duplicates if it switches between localhost and 127.0.0.1
+
+            if (!agentsRef.current[ip]) {
+              agentsRef.current[ip] = {
+                ip: ip,
+                lastSeen: timestamp,
+                position: new THREE.Vector3(0, 2, 0) // Default
+              };
+            } else {
+              agentsRef.current[ip].lastSeen = timestamp;
+            }
           };
 
-          if (data.srcIsAgent) updateAgentIP(data.srcIp);
-          if (data.dstIsAgent) updateAgentIP(data.dstIp);
+          if (data.srcIsAgent) registerAgent(data.srcIp);
+          if (data.dstIsAgent) registerAgent(data.dstIp);
 
           // Update Peers
           const currentPeers = peersRef.current;
           const processPeer = (ip, isAgent, role) => {
             if (!ip) return;
-            // Clean up loopback/agent naming
-            if (isAgent || ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return;
+            // If it is an agent, we handled it above. DO NOT add to peers list.
+            if (isAgent) return;
+            // Also ignore simple loopback if not tagged as agent (unlikely in this context but good safety)
+            if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return;
 
             if (!currentPeers[ip]) {
               const angle = Math.random() * Math.PI * 2;
@@ -560,8 +576,14 @@ export default function TrafficVisualizer() {
 
           // Traffic Links
           const getPos = (ip, isAgent) => {
-            if (isAgent || ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost")
+            if (isAgent) {
+              // Return agent pos
+              return agentsRef.current[ip]?.position || new THREE.Vector3(0, 2, 0);
+            }
+            // Ignore placeholders
+            if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost")
               return new THREE.Vector3(0, 2, 0);
+
             return currentPeers[ip]?.position || new THREE.Vector3(0, 0, 0);
           };
 
@@ -600,6 +622,43 @@ export default function TrafficVisualizer() {
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
+
+      // --- Update Agents ---
+      const currentAgents = agentsRef.current;
+      const agentIPs = Object.keys(currentAgents);
+      let agentsChanged = false;
+
+      // Update Agent Positions based on count
+      if (agentIPs.length === 1) {
+        // Single agent: Center
+        if (currentAgents[agentIPs[0]].position.x !== 0 || currentAgents[agentIPs[0]].position.z !== 0) {
+          currentAgents[agentIPs[0]].position = new THREE.Vector3(0, 2, 0);
+          agentsChanged = true;
+        }
+      } else if (agentIPs.length > 1) {
+        // Multiple agents: Distribute in circle
+        agentIPs.forEach((ip, index) => {
+          const angle = (index / agentIPs.length) * Math.PI * 2;
+          const tx = Math.cos(angle) * AGENT_CLUSTER_RADIUS;
+          const tz = Math.sin(angle) * AGENT_CLUSTER_RADIUS;
+          const targetPos = new THREE.Vector3(tx, 2, tz);
+
+          if (currentAgents[ip].position.distanceTo(targetPos) > 0.1) {
+            currentAgents[ip].position = targetPos;
+            agentsChanged = true;
+          }
+        });
+      }
+
+      // Cleanup old agents? Maybe keep them for longer than peers.
+      // For now, let's just keep them.
+
+      if (agentsChanged || Object.keys(agentsState).length !== agentIPs.length) {
+        setAgentsState({ ...currentAgents });
+      }
+
+
+      // --- Update Peers ---
       const currentPeers = peersRef.current;
       let peersChanged = false;
       let newEffects = [];
@@ -642,7 +701,7 @@ export default function TrafficVisualizer() {
     }, 100);
 
     return () => clearInterval(interval);
-  }, [selectedPeer]); // Re-bind when selectedPeer changes to ensure closure has latest value
+  }, [selectedPeer, agentsState]); // Re-bind when needed
 
   // Link Sync
   useEffect(() => {
@@ -720,7 +779,15 @@ export default function TrafficVisualizer() {
           </mesh>
         )}
 
-        <Agent label={agentIP} />
+        {/* Render Agents */}
+        {Object.entries(agentsState).map(([ip, agent]) => (
+          <Agent key={ip} label={ip} position={agent.position} />
+        ))}
+        {/* If no agents detected yet, show default placeholder? Or nothing? 
+            Let's show a default placeholder if empty to imply system is ready. 
+         */}
+        {Object.keys(agentsState).length === 0 && <Agent label="Waiting..." />}
+
 
         {Object.entries(peersState).map(([ip, data]) => (
           <Peer
