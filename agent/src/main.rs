@@ -30,6 +30,9 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     mock: bool,
+
+    #[arg(long, default_value_t = false)]
+    ipv6: bool,
 }
 
 #[tokio::main]
@@ -151,6 +154,9 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>) -> Result<(), Box<dyn 
                                 dst_ip = ipv4.destination.iter().map(|b| b.to_string()).collect::<Vec<String>>().join(".");
                             },
                             IpHeader::Version6(ipv6, _) => {
+                                if !args.ipv6 {
+                                    continue;
+                                }
                                 use std::net::Ipv6Addr;
                                 let s = Ipv6Addr::from(ipv6.source);
                                 let d = Ipv6Addr::from(ipv6.destination);
