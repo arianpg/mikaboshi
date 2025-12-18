@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package packet;
+
+service AgentService {
+  rpc StreamPackets (stream Packet) returns (Empty) {}
+  rpc Subscribe (Empty) returns (stream Packet) {}
+}
+
+message Empty {}
+
+message Packet {
+  string type = 1;
+  string src_ip = 2;
+  string dst_ip = 3;
+  bool src_is_agent = 4;
+  bool dst_is_agent = 5;
+  int32 size = 6;
+  string proto = 7;
+  int32 src_port = 8;
+  int32 dst_port = 9;
+}

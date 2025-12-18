@@ -1,0 +1,118 @@
+use axum::Router;
+use futures::stream::StreamExt;
+use std::net::SocketAddr;
+
+use tokio::sync::broadcast;
+use tonic::{transport::Server, Request, Response, Status};
+use tower_http::services::ServeDir;
+use tower_http::cors::{CorsLayer, Any};
+
+pub mod packet {
+    tonic::include_proto!("packet");
+}
+
+use packet::agent_service_server::{AgentService, AgentServiceServer};
+use packet::{Empty, Packet};
+
+// Shared state
+struct AppState {
+    tx: broadcast::Sender<Packet>,
+}
+
+#[derive(Default)]
+struct GrpcService {
+    tx: Option<broadcast::Sender<Packet>>,
+}
+
+#[tonic::async_trait]
+impl AgentService for GrpcService {
+    async fn stream_packets(
+        &self,
+        request: Request<tonic::Streaming<Packet>>,
+    ) -> Result<Response<Empty>, Status> {
+        let mut stream = request.into_inner();
+        let tx = self.tx.clone().ok_or(Status::internal("Internal error"))?;
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(packet) => {
+                     // Broadcast packet to all subscribers (gRPC-Web clients)
+                     let _ = tx.send(packet);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(Response::new(Empty {}))
+    }
+
+    type SubscribeStream = tokio_stream::wrappers::ReceiverStream<Result<Packet, Status>>;
+
+    async fn subscribe(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        let tx = self.tx.clone().ok_or(Status::internal("Internal error"))?;
+        let mut rx = tx.subscribe();
+
+        // Create a channel for this specific client stream
+        let (client_tx, client_rx) = tokio::sync::mpsc::channel(100);
+
+        tokio::spawn(async move {
+            while let Ok(packet) = rx.recv().await {
+                if client_tx.send(Ok(packet)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(client_rx)))
+    }
+}
+
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+
+    // Channel for broadcasting packets
+    let (tx, _rx) = broadcast::channel(100);
+
+    // --- gRPC Server (including gRPC-Web) ---
+    let grpc_addr = "[::]:50051".parse()?;
+    let grpc_service = GrpcService { tx: Some(tx.clone()) }; 
+    
+    // Enable gRPC-Web and CORS
+    let service = AgentServiceServer::new(grpc_service);
+    let service = tonic_web::enable(service);
+
+    println!("gRPC (Native + Web) server listening on {}", grpc_addr);
+    
+    // Spawn gRPC server
+    tokio::spawn(async move {
+        Server::builder()
+            .accept_http1(true) // Required for gRPC-Web
+            .layer(CorsLayer::new()
+                .allow_origin(Any)
+                .allow_headers(Any)
+                .allow_methods(Any)
+            )
+            .add_service(service)
+            .serve(grpc_addr)
+            .await
+            .unwrap();
+    });
+
+    // --- HTTP Server (Static Files) ---
+    // Serve static files from web/dist
+    let app = Router::new()
+        .nest_service("/", ServeDir::new("web/dist"));
+
+    let http_addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    println!("HTTP server listening on {}", http_addr);
+    
+    let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+
+    Ok(())
+}

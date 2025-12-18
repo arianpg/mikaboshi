@@ -1,0 +1,759 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { OrbitControls, Text, PerspectiveCamera, Sparkles, Grid, Html } from '@react-three/drei';
+import { EffectComposer, Bloom, Vignette, Scanline } from '@react-three/postprocessing';
+import * as THREE from 'three';
+
+// --- Constants ---
+const PEER_RADIUS = 15;
+const TRAFFIC_SPEED = 0.5;
+const PEER_TIMEOUT = 60000; // 1 minute
+
+// --- Helper: Generate Position on Circle ---
+const getPosition = (index, total) => {
+  const angle = (index / total) * Math.PI * 2;
+  return new THREE.Vector3(Math.cos(angle) * PEER_RADIUS, 0, Math.sin(angle) * PEER_RADIUS);
+};
+
+// --- Components ---
+
+function Agent({ label }) {
+  const groupRef = useRef();
+  const coreRef = useRef();
+  const shell1Ref = useRef();
+  const shell2Ref = useRef();
+  const ringRef = useRef();
+
+  useFrame((state, delta) => {
+    const t = state.clock.getElapsedTime();
+
+    // Bobbing
+    if (groupRef.current) {
+      groupRef.current.position.y = Math.sin(t * 1) * 0.2 + 2.0;
+    }
+
+    // Core Pulse
+    if (coreRef.current) {
+      const scale = 1 + Math.sin(t * 3) * 0.1;
+      coreRef.current.scale.setScalar(scale);
+    }
+
+    // Shell Rotations (Multi-axis)
+    if (shell1Ref.current) {
+      shell1Ref.current.rotation.x += delta * 0.2;
+      shell1Ref.current.rotation.y += delta * 0.3;
+    }
+    if (shell2Ref.current) {
+      shell2Ref.current.rotation.x -= delta * 0.1;
+      shell2Ref.current.rotation.z += delta * 0.2;
+    }
+
+    // Ring Rotation
+    if (ringRef.current) {
+      ringRef.current.rotation.z -= delta * 0.5;
+    }
+  });
+
+  return (
+    <group ref={groupRef}>
+      {/* Core Sphere (Glowing) */}
+      <mesh ref={coreRef}>
+        <sphereGeometry args={[0.8, 32, 32]} />
+        <meshStandardMaterial
+          color="#00ffff"
+          emissive="#00ffff"
+          emissiveIntensity={2}
+          toneMapped={false}
+        />
+        <pointLight color="#00ffff" intensity={2} distance={5} />
+      </mesh>
+
+      {/* Wireframe Shell 1 */}
+      <mesh ref={shell1Ref}>
+        <icosahedronGeometry args={[1.2, 1]} />
+        <meshBasicMaterial color="#0088ff" wireframe transparent opacity={0.3} />
+      </mesh>
+
+      {/* Wireframe Shell 2 */}
+      <mesh ref={shell2Ref}>
+        <icosahedronGeometry args={[1.4, 0]} />
+        <meshBasicMaterial color="#ffffff" wireframe transparent opacity={0.1} />
+      </mesh>
+
+      {/* Orbiting Ring System (Flat on XZ plane initially) */}
+      <group rotation={[Math.PI / 2, 0, 0]}>
+        <mesh ref={ringRef}>
+          <ringGeometry args={[1.8, 1.9, 64, 1, 0, Math.PI * 1.5]} />
+          <meshBasicMaterial color="#00ffff" side={THREE.DoubleSide} transparent opacity={0.5} />
+        </mesh>
+        <mesh rotation={[0, 0, Math.PI]}>
+          <ringGeometry args={[1.6, 1.65, 64, 1, 0, Math.PI]} />
+          <meshBasicMaterial color="#0088ff" side={THREE.DoubleSide} transparent opacity={0.3} />
+        </mesh>
+      </group>
+
+      {/* Base "Magic Circle" on floor */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -1.5, 0]}>
+        <ringGeometry args={[2, 2.2, 64]} />
+        <meshBasicMaterial color="#00ffff" transparent opacity={0.2} />
+      </mesh>
+
+      <Text position={[0, 2.5, 0]} fontSize={0.5} color="#00ffff" anchorX="center" anchorY="middle">
+        {label || "ME (Agent)"}
+      </Text>
+    </group>
+  );
+}
+
+// --- Helper: Check for Private IP ---
+const isPrivateIP = (ip) => {
+  // IPv4 Private Ranges
+  // 10.0.0.0/8
+  // 172.16.0.0/12
+  // 192.168.0.0/16
+  // 127.0.0.0/8 (Loopback)
+  if (ip.startsWith("10.") || ip.startsWith("127.")) return true;
+  if (ip.startsWith("192.168.")) return true;
+
+  if (ip.startsWith("172.")) {
+    const secondOctet = parseInt(ip.split('.')[1], 10);
+    if (secondOctet >= 16 && secondOctet <= 31) return true;
+  }
+
+  // IPv6 Private/Local Ranges
+  // fc00::/7 (Unique Local) -> starts with fc or fd
+  // fe80::/10 (Link Local) -> starts with fe8, fe9, fea, feb
+  const lowerIp = ip.toLowerCase();
+  if (lowerIp.startsWith("fc") || lowerIp.startsWith("fd")) return true;
+  if (lowerIp.startsWith("fe8") || lowerIp.startsWith("fe9") || lowerIp.startsWith("fea") || lowerIp.startsWith("feb")) return true;
+  if (lowerIp === "::1") return true;
+
+  return false;
+};
+
+function Peer({ ip, position, isHot, isSelected, onClick, onDragStart, onDragEnd, onDrag }) {
+  const groupRef = useRef();
+  const ring1Ref = useRef();
+  const ring2Ref = useRef();
+  const ring3Ref = useRef();
+  const [hovered, setHover] = useState(false);
+
+  // Color Logic
+  // Priority: Selected > Hot > Internet (Orange) > Intranet (Blue)
+  let baseColor = "#0088ff"; // Default Blue (Intranet)
+
+  if (!isPrivateIP(ip)) {
+    baseColor = "#ff8800"; // Orange (Internet)
+  }
+
+  if (isHot) baseColor = "#ff0000"; // Red (High Traffic)
+  if (isSelected) baseColor = "#ffcc00"; // Gold (Selected)
+
+  const glowColor = isSelected ? "#ffee00" : baseColor;
+
+  useFrame((state, delta) => {
+    if (groupRef.current) {
+      // Look away from center (0,0,0)
+      const mysPos = groupRef.current.position;
+      const target = new THREE.Vector3(mysPos.x * 2, mysPos.y, mysPos.z * 2);
+      groupRef.current.lookAt(target);
+    }
+
+    // GITS Style Rotation
+    if (ring1Ref.current) ring1Ref.current.rotation.z -= delta * 0.5;
+    if (ring2Ref.current) ring2Ref.current.rotation.z += delta * 0.3;
+    if (ring3Ref.current) ring3Ref.current.rotation.z -= delta * 1.0;
+  });
+
+  return (
+    <group ref={groupRef} position={position}>
+      {/* Interactive Hit Area */}
+      <mesh
+        visible={false}
+        rotation={[Math.PI / 2, 0, 0]}
+        onClick={(e) => { e.stopPropagation(); onClick(ip); }}
+        onPointerOver={() => setHover(true)}
+        onPointerOut={() => setHover(false)}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          e.target.setPointerCapture(e.pointerId);
+          onDragStart(ip);
+        }}
+        onPointerUp={(e) => {
+          e.stopPropagation();
+          e.target.releasePointerCapture(e.pointerId);
+          onDragEnd();
+        }}
+        onPointerMove={(e) => {
+          if (e.buttons) { // dragging
+            onDrag(e.point);
+          }
+        }}
+      >
+        <cylinderGeometry args={[2, 2, 1, 16]} />
+        <meshBasicMaterial />
+      </mesh>
+
+      {/* Visual Representation: Flat Disc (Standing Up) */}
+      <group rotation={[Math.PI / 2, 0, 0]}>
+        {/* Main Disc Body */}
+        <mesh position={[0, 0, 0]}>
+          <cylinderGeometry args={[1.5, 1.5, 0.1, 32]} />
+          <meshStandardMaterial
+            color="#001122"
+            emissive={baseColor}
+            emissiveIntensity={hovered ? 0.5 : 0.2}
+          />
+
+        </mesh>
+
+        {/* Outer Ring (Static) */}
+        <mesh position={[0, 0.06, 0]}>
+          <ringGeometry args={[1.5, 1.6, 64]} />
+          <meshBasicMaterial color={glowColor} side={THREE.DoubleSide} />
+        </mesh>
+
+        {/* Rotating Arc 1 (Slow, Large) */}
+        <mesh ref={ring1Ref} position={[0, 0.07, 0]}>
+          <ringGeometry args={[1.2, 1.3, 32, 1, 0, Math.PI * 1.5]} />
+          <meshBasicMaterial color={baseColor} transparent opacity={0.6} side={THREE.DoubleSide} />
+        </mesh>
+
+        {/* Rotating Arc 2 (Counter-rotate, Medium) */}
+        <mesh ref={ring2Ref} position={[0, 0.08, 0]} rotation={[0, 0, 1]}>
+          <ringGeometry args={[0.9, 1.0, 32, 1, 0, Math.PI]} />
+          <meshBasicMaterial color={baseColor} transparent opacity={0.4} side={THREE.DoubleSide} />
+        </mesh>
+
+        {/* Rotating Arc 3 (Fast, Small bits) */}
+        <mesh ref={ring3Ref} position={[0, 0.09, 0]}>
+          <ringGeometry args={[0.6, 0.7, 16, 1, 0, Math.PI * 0.5]} />
+          <meshBasicMaterial color={glowColor} transparent opacity={0.8} side={THREE.DoubleSide} />
+        </mesh>
+
+        {/* Text Label (IP) */}
+        <Text
+          position={[0, 0.1, 0]}
+          rotation={[-Math.PI / 2, 0, 0]} // Face UP (local Y) -> Face Target (World Z)
+          fontSize={0.4}
+          color={isSelected ? "#ffffff" : "#cccccc"}
+          anchorX="center"
+          anchorY="middle"
+        >
+          {ip}
+        </Text>
+      </group>
+    </group>
+  );
+}
+
+const DECAY_RATE = 2.0;
+
+function ConnectionLink({ linkData }) {
+  const ref = useRef();
+  // Fixed thinness (Reduced)
+  const THICKNESS = 0.05;
+
+  useFrame((state, delta) => {
+    if (ref.current && linkData) {
+      // Time-based decay
+      linkData.volume = Math.max(0, linkData.volume - (linkData.volume * DECAY_RATE * delta));
+
+      ref.current.scale.x = THICKNESS;
+      ref.current.scale.z = THICKNESS;
+
+      // Update Position and Orientation
+      const start = linkData.start;
+      const end = linkData.end;
+      const dist = start.distanceTo(end);
+
+      ref.current.position.lerpVectors(start, end, 0.5);
+      ref.current.scale.y = dist;
+
+      const direction = new THREE.Vector3().subVectors(end, start).normalize();
+      const up = new THREE.Vector3(0, 1, 0);
+      const quaternion = new THREE.Quaternion().setFromUnitVectors(up, direction);
+      ref.current.setRotationFromQuaternion(quaternion);
+
+      // COLOR / INTENSITY Change logic
+      const ratio = Math.min(1.0, linkData.volume / 10000);
+
+      // Color Interpolation
+      const color = new THREE.Color().lerpColors(
+        new THREE.Color("#00ffff"),
+        new THREE.Color("#ff0000"),
+        ratio
+      );
+
+      ref.current.material.color = color;
+      ref.current.material.emissive = color;
+      ref.current.material.emissiveIntensity = 1 + ratio * 10;
+    }
+  });
+
+  return (
+    <mesh ref={ref}>
+      <cylinderGeometry args={[1, 1, 1, 8]} />
+      <meshStandardMaterial toneMapped={false} transparent opacity={0.6} />
+    </mesh>
+  )
+}
+
+function DespawnEffect({ position, onComplete }) {
+  const ref = useRef();
+  const life = useRef(1.0); // 1.0 to 0.0
+
+  useFrame((state, delta) => {
+    life.current -= delta * 2.0; // Die in 0.5s
+    if (life.current <= 0) {
+      onComplete();
+      return;
+    }
+
+    if (ref.current) {
+      const scale = 1 + (1 - life.current) * 3; // Expand 1 -> 4
+      ref.current.scale.setScalar(scale);
+      ref.current.material.opacity = life.current;
+    }
+  });
+
+  return (
+    <mesh ref={ref} position={position} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[1, 1.2, 32]} />
+      <meshBasicMaterial color="#ff0055" transparent side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
+// --- Info Panel Component ---
+function InfoPanel({ peerIp, peerData, onClose }) {
+  const [details, setDetails] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const fetchDetails = () => {
+    setLoading(true);
+    setError(null);
+    setDetails(null);
+
+    fetch(`https://ipapi.co/${peerIp}/json/`)
+      .then(res => {
+        if (!res.ok) throw new Error(res.statusText || 'Fetch failed');
+        return res.json();
+      })
+      .then(data => {
+        setDetails(data);
+        setLoading(false);
+      })
+      .catch(err => {
+        console.error("GeoIP Error", err);
+        setError("Failed to fetch details");
+        setLoading(false);
+      });
+  };
+
+  // Reset state when peerIp changes
+  useEffect(() => {
+    setDetails(null);
+    setLoading(false);
+    setError(null);
+  }, [peerIp]);
+
+  if (!peerIp) return null;
+
+  // Render ports logic
+  const renderPorts = (pData) => {
+    if (!pData) return 'N/A';
+    const ins = pData.portsIn ? Array.from(pData.portsIn) : [];
+    const outs = pData.portsOut ? Array.from(pData.portsOut) : [];
+
+    if (ins.length === 0 && outs.length === 0) return 'N/A';
+
+    return (
+      <div style={{ fontSize: '0.9em' }}>
+        {ins.length > 0 && <div><span style={{ color: '#00ffcc' }}>IN:</span> {ins.join(', ')}</div>}
+        {outs.length > 0 && <div><span style={{ color: '#ffcc00' }}>OUT:</span> {outs.join(', ')}</div>}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{
+      position: 'absolute',
+      top: '20px',
+      right: '20px',
+      width: '300px',
+      background: 'rgba(0, 10, 20, 0.9)',
+      border: '1px solid #00ffcc',
+      color: '#00ffcc',
+      padding: '20px',
+      fontFamily: 'monospace',
+      borderRadius: '8px',
+      backdropFilter: 'blur(5px)',
+      zIndex: 1000
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+        <h3 style={{ margin: 0 }}>PEER DETAILS</h3>
+        <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#ff0055', cursor: 'pointer', fontSize: '16px' }}>X</button>
+      </div>
+
+      <div><strong>IP:</strong> {peerIp}</div>
+      <div><strong>Last Seen:</strong> {new Date(peerData?.lastSeen).toLocaleTimeString()}</div>
+      <div><strong>Speed:</strong> {((peerData?.volume || 0) * 2 / 1024).toFixed(2)} KB/s</div>
+      <div><strong>Protocols:</strong> {peerData?.protocols ? Array.from(peerData.protocols).join(', ') : 'N/A'}</div>
+      <div><strong>Ports:</strong> {renderPorts(peerData)}</div>
+
+      <hr style={{ borderColor: '#004444' }} />
+
+      {!details && !loading && !error && (
+        <button
+          onClick={fetchDetails}
+          style={{
+            width: '100%',
+            padding: '8px',
+            background: '#0a4a4a',
+            color: '#00ffcc',
+            border: '1px solid #00ffcc',
+            cursor: 'pointer',
+            marginTop: '10px'
+          }}
+        >
+          Fetch GeoIP Info
+        </button>
+      )}
+
+      {loading && <div>Loading GeoIP...</div>}
+
+      {details && (
+        <>
+          <div><strong>Country:</strong> {details.country_name}</div>
+          <div><strong>City:</strong> {details.city}</div>
+          <div><strong>ISP:</strong> {details.org}</div>
+          <div><strong>ASN:</strong> {details.asn}</div>
+        </>
+      )}
+      {error && <div style={{ color: 'red' }}>{error}</div>}
+    </div>
+  );
+}
+
+
+
+import { retry, delay, repeat } from 'rxjs/operators';
+import { timer } from 'rxjs';
+import { AgentServiceClientImpl, Empty } from './proto/packet';
+import { GrpcWebImpl } from './proto/GrpcWebImpl';
+
+export default function TrafficVisualizer() {
+  // useRefs for data (Source of Truth)
+  const peersRef = useRef({});
+  const linksRef = useRef({});
+  // const ws = useRef(null); // No longer needed
+
+  // State
+  const [peersState, setPeersState] = useState({});
+  const [linksState, setLinksState] = useState({});
+  const [agentIP, setAgentIP] = useState(null);
+  const [despawnEffects, setDespawnEffects] = useState([]);
+
+  // Interaction State
+  const [selectedPeer, setSelectedPeer] = useState(null);
+  const [draggingPeer, setDraggingPeer] = useState(null);
+  const orbitRef = useRef();
+
+
+  const removeEffect = (id) => {
+    setDespawnEffects(prev => prev.filter(e => e.id !== id));
+  };
+
+  useEffect(() => {
+    // gRPC-Web Setup
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+    const host = window.location.hostname;
+    // gRPC-Web on 50051
+    const port = '50051';
+    const serverUrl = `${protocol}//${host}:${port}`;
+
+    console.log('Connecting to gRPC-Web Server at', serverUrl);
+
+    const rpc = new GrpcWebImpl(serverUrl, { debug: false });
+    const client = new AgentServiceClientImpl(rpc);
+
+    // Subscribe with Retry Logic
+    // retry: resubscribe on error
+    // repeat: resubscribe on complete (though server streaming usually doesn't complete unless server closes)
+    const sub = client.Subscribe(Empty.create({}))
+      .pipe(
+        // If error occurs, wait 2 seconds and retry.
+        retry({
+          delay: (errors) => errors.pipe(delay(2000))
+        }),
+        // If stream completes unexpectedly, restart it. 
+        // Note: 'repeat' usually restarts immediately on complete.
+        // We can add a delay if needed but server restart usually takes time so immediate retry might fail and trigger retry logic.
+        repeat({ delay: 3000 })
+      )
+      .subscribe({
+        next: (data) => {
+          // data is Packet object directly
+          if (data.type !== 'traffic') return;
+
+          const timestamp = Date.now();
+
+          // Identity Check
+          const isLoopback = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
+          const updateAgentIP = (newIP) => {
+            if (!newIP) return;
+            setAgentIP(currentIP => {
+              if (currentIP && !isLoopback(currentIP) && isLoopback(newIP)) return currentIP;
+              return newIP;
+            });
+          };
+
+          if (data.srcIsAgent) updateAgentIP(data.srcIp);
+          if (data.dstIsAgent) updateAgentIP(data.dstIp);
+
+          // Update Peers
+          const currentPeers = peersRef.current;
+          const processPeer = (ip, isAgent, role) => {
+            if (!ip) return;
+            // Clean up loopback/agent naming
+            if (isAgent || ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return;
+
+            if (!currentPeers[ip]) {
+              const angle = Math.random() * Math.PI * 2;
+              currentPeers[ip] = {
+                position: new THREE.Vector3(Math.cos(angle) * PEER_RADIUS, Math.random() * 5 - 2, Math.sin(angle) * PEER_RADIUS),
+                lastSeen: timestamp,
+                volume: 0,
+                protocols: new Set(),
+                portsIn: new Set(),
+                portsOut: new Set()
+              };
+              setPeersState({ ...currentPeers });
+            } else {
+              currentPeers[ip].lastSeen = timestamp;
+            }
+            if (currentPeers[ip]) {
+              currentPeers[ip].volume += data.size;
+              // Capture Protocol
+              if (data.proto) currentPeers[ip].protocols.add(data.proto);
+
+              // Capture Port
+              // If Peer is 'src', it is sending (OUT)
+              // If Peer is 'dst', it is receiving (IN)
+              if (role === 'src') {
+                if (data.srcPort && data.srcPort !== 0) currentPeers[ip].portsOut.add(data.srcPort);
+              } else {
+                if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsIn.add(data.dstPort);
+              }
+
+              // Limit
+              if (currentPeers[ip].protocols.size > 5) currentPeers[ip].protocols = new Set(Array.from(currentPeers[ip].protocols).slice(-5));
+              if (currentPeers[ip].portsIn.size > 5) currentPeers[ip].portsIn = new Set(Array.from(currentPeers[ip].portsIn).slice(-5));
+              if (currentPeers[ip].portsOut.size > 5) currentPeers[ip].portsOut = new Set(Array.from(currentPeers[ip].portsOut).slice(-5));
+            }
+          }
+
+          processPeer(data.srcIp, data.srcIsAgent, 'src');
+          processPeer(data.dstIp, data.dstIsAgent, 'dst');
+
+          // Traffic Links
+          const getPos = (ip, isAgent) => {
+            if (isAgent || ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost")
+              return new THREE.Vector3(0, 2, 0);
+            return currentPeers[ip]?.position || new THREE.Vector3(0, 0, 0);
+          };
+
+          const srcPos = getPos(data.srcIp, data.srcIsAgent);
+          const dstPos = getPos(data.dstIp, data.dstIsAgent);
+
+          if (srcPos && dstPos && !srcPos.equals(dstPos)) {
+            const ids = [data.srcIp, data.dstIp].sort();
+            const linkId = ids.join('-');
+
+            if (!linksRef.current[linkId]) {
+              linksRef.current[linkId] = {
+                start: srcPos,
+                end: dstPos,
+                volume: 0,
+                lastSeen: timestamp
+              };
+            }
+
+            linksRef.current[linkId].volume += Math.max(data.size, 500);
+            linksRef.current[linkId].lastSeen = timestamp;
+            linksRef.current[linkId].start = srcPos;
+            linksRef.current[linkId].end = dstPos;
+          }
+        },
+        error: (err) => console.error('gRPC Error:', err),
+        complete: () => console.log('gRPC Stream Completed')
+      });
+
+    return () => {
+      sub.unsubscribe();
+    };
+  }, []);
+
+  // Sync Loop
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const currentPeers = peersRef.current;
+      let peersChanged = false;
+      let newEffects = [];
+
+      Object.keys(currentPeers).forEach(key => {
+        currentPeers[key].volume *= 0.8;
+
+        // Skip timeout for selected peer
+        const isSelected = (key === selectedPeer);
+
+        if (!isSelected && now - currentPeers[key].lastSeen > PEER_TIMEOUT) {
+          newEffects.push({ id: key + '-' + now, position: currentPeers[key].position });
+          delete currentPeers[key];
+          peersChanged = true;
+
+          if (selectedPeer === key) setSelectedPeer(null); // Should not happen due to guard, but safety
+        }
+      });
+
+      if (newEffects.length > 0) {
+        setDespawnEffects(prev => [...prev, ...newEffects]);
+      }
+
+      // Ranking
+      const sortedKeys = Object.keys(currentPeers).sort((a, b) => currentPeers[b].volume - currentPeers[a].volume);
+      const top3 = new Set(sortedKeys.slice(0, 3));
+
+      Object.keys(currentPeers).forEach(key => {
+        const isTop = top3.has(key) && currentPeers[key].volume > 100;
+        if (currentPeers[key].isHot !== isTop) {
+          currentPeers[key].isHot = isTop;
+          peersChanged = true;
+        }
+      });
+
+      if (peersChanged) {
+        setPeersState({ ...currentPeers });
+      }
+
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [selectedPeer]); // Re-bind when selectedPeer changes to ensure closure has latest value
+
+  // Link Sync
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const currentLinks = linksRef.current;
+
+      Object.keys(currentLinks).forEach(key => {
+        if (currentLinks[key].volume < 10 && (now - currentLinks[key].lastSeen > 3000)) {
+          delete currentLinks[key];
+        }
+      });
+
+      setLinksState(prev => {
+        const prevKeys = Object.keys(prev).join(',');
+        const currKeys = Object.keys(currentLinks).join(',');
+        if (prevKeys !== currKeys) return { ...currentLinks };
+        return prev;
+      });
+    }, 200);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Handlers
+  const handlePeerClick = (ip) => {
+    setSelectedPeer(ip);
+  };
+
+  const handleDragStart = (ip) => {
+    setDraggingPeer(ip);
+    if (orbitRef.current) orbitRef.current.enabled = false;
+  }
+
+  const handleDragEnd = () => {
+    setDraggingPeer(null);
+    if (orbitRef.current) orbitRef.current.enabled = true;
+  }
+
+  const handleDrag = (point) => {
+    if (draggingPeer && peersRef.current[draggingPeer]) {
+      const p = peersRef.current[draggingPeer];
+      // Create NEW Vector3 to ensure React detects change (or use mutation if referencing same object in render, but new Ref allows safer updates)
+      // Actually, simply mutating p.position IS reflected if we setPeersState with shallow copy, causing re-render.
+      // But passing the SAME Vector3 object as prop might be ignored by R3F reconciliation?
+      // Let's create a NEW Vector3 to be safe.
+      p.position = new THREE.Vector3(point.x, point.y, point.z);
+
+      // Force update by creating new object reference for state
+      setPeersState({ ...peersRef.current });
+    }
+  }
+
+  return (
+    <div style={{ width: '100vw', height: '100vh', background: 'black', position: 'relative' }}>
+      <Canvas>
+        <PerspectiveCamera makeDefault position={[30, 20, 30]} fov={60} />
+        <OrbitControls ref={orbitRef} autoRotate={false} />
+
+        <ambientLight intensity={0.2} />
+        <pointLight position={[10, 10, 10]} intensity={1} color="#00ffff" />
+        <pointLight position={[-10, 10, -10]} intensity={1} color="#ff00ff" />
+
+        <color attach="background" args={['#050510']} />
+        <fog attach="fog" args={['#050510', 30, 150]} />
+
+        <Grid position={[0, -0.1, 0]} args={[100, 100]} cellSize={2} cellThickness={1} cellColor="#0a4a4a" sectionSize={10} sectionThickness={1.5} sectionColor="#1a1a3a" fadeDistance={80} fadeStrength={1.5} infiniteGrid />
+
+        {/* Invisible Plane for Raycasting during drag if needed, 
+            but using onPointerMove on Peer itself is tricky because the mesh moves under cursor.
+            Ideally we drag on a plane.
+         */}
+        {draggingPeer && (
+          <mesh visible={false} onPointerMove={(e) => handleDrag(e.point)} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]}>
+            <planeGeometry args={[200, 200]} />
+          </mesh>
+        )}
+
+        <Agent label={agentIP} />
+
+        {Object.entries(peersState).map(([ip, data]) => (
+          <Peer
+            key={ip}
+            ip={ip}
+            position={data.position}
+            isHot={data.isHot}
+            isSelected={ip === selectedPeer}
+            onClick={handlePeerClick}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+            onDrag={handleDrag} // Fallback if passing directly to peer
+          />
+        ))}
+
+        {despawnEffects.map(effect => (
+          <DespawnEffect key={effect.id} position={effect.position} onComplete={() => removeEffect(effect.id)} />
+        ))}
+
+        {Object.entries(linksState).map(([id, linkData]) => (
+          <ConnectionLink key={id} linkData={linkData} />
+        ))}
+
+      </Canvas>
+
+      {/* UI Overlay */}
+      {selectedPeer && (
+        <InfoPanel
+          peerIp={selectedPeer}
+          peerData={peersRef.current[selectedPeer]}
+          onClose={() => setSelectedPeer(null)}
+        />
+      )}
+    </div>
+  );
+}

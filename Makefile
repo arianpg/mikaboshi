@@ -1,0 +1,22 @@
+.PHONY: build build-agent build-server build-web
+
+build-agent:
+	mkdir -p build
+	docker build -f agent/Dockerfile --target export --output type=local,dest=./build .
+
+build-server: build-web
+	mkdir -p build
+	docker build -f server/Dockerfile --target export --output type=local,dest=./build .
+
+build-web: generate-web-proto
+	mkdir -p build/web/dist
+	docker build -f web/build.Dockerfile -t mikaboshi-web-builder web --output type=local,dest=./build/web/dist
+
+generate-web-proto:
+	docker build -f web/proto.Dockerfile -t mikaboshi-proto-generator web
+	docker run --rm -v $(PWD):/workspace mikaboshi-proto-generator \
+		-I=proto --plugin=protoc-gen-ts_proto=/usr/local/bin/protoc-gen-ts_proto \
+		--ts_proto_out=web/src/proto \
+		--ts_proto_opt=outputServices=default,env=browser,useObservables=true,esModuleInterop=true \
+		packet.proto
+	

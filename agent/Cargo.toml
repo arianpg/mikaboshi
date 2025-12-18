@@ -1,0 +1,19 @@
+[package]
+name = "mikaboshi-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tonic = "0.10"
+prost = "0.12"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+pcap = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+futures = "0.3"
+rand = "0.8"
+local-ip-address = "0.5"
+etherparse = "0.13"
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = "0.10"
