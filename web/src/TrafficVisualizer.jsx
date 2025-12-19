@@ -507,11 +507,16 @@ export default function TrafficVisualizer() {
           const isLoopback = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
 
           const registerAgent = (ip) => {
-            if (!ip || isLoopback(ip) || ip === "AGENT") return; // Ignore local references if they come across
-            // NOTE: Server usually sends real IP. If "127.0.0.1" comes as agent IP, we might want to ignore or handle specially?
-            // For now, accept all src_is_agent tagged IPs unless they are strictly loopback which might be noise
-            // Actually, if agent reports as 127.0.0.1 (e.g. running locally), we should display it.
-            // But let's avoid duplicates if it switches between localhost and 127.0.0.1
+            if (!ip || isLoopback(ip) || ip === "AGENT") return;
+
+            // Promote Peer to Agent if needed
+            if (peersRef.current[ip]) {
+              delete peersRef.current[ip];
+              // If selected, deselect to avoid issues
+              if (selectedPeer === ip) setSelectedPeer(null);
+              // Trigger peer update
+              setPeersState({ ...peersRef.current });
+            }
 
             if (!agentsRef.current[ip]) {
               agentsRef.current[ip] = {
@@ -533,6 +538,9 @@ export default function TrafficVisualizer() {
             if (!ip) return;
             // If it is an agent, we handled it above. DO NOT add to peers list.
             if (isAgent) return;
+            // If it is KNOWN as an agent (even if this specific packet says false due to unidirectional visibility), SKIP.
+            if (agentsRef.current[ip]) return;
+
             // Also ignore simple loopback if not tagged as agent (unlikely in this context but good safety)
             if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return;
 
@@ -575,10 +583,10 @@ export default function TrafficVisualizer() {
           processPeer(data.dstIp, data.dstIsAgent, 'dst');
 
           // Traffic Links
-          const getPos = (ip, isAgent) => {
-            if (isAgent) {
-              // Return agent pos
-              return agentsRef.current[ip]?.position || new THREE.Vector3(0, 2, 0);
+          const getPos = (ip) => {
+            // Check agents first
+            if (agentsRef.current[ip]) {
+              return agentsRef.current[ip].position;
             }
             // Ignore placeholders
             if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost")
@@ -587,8 +595,8 @@ export default function TrafficVisualizer() {
             return currentPeers[ip]?.position || new THREE.Vector3(0, 0, 0);
           };
 
-          const srcPos = getPos(data.srcIp, data.srcIsAgent);
-          const dstPos = getPos(data.dstIp, data.dstIsAgent);
+          const srcPos = getPos(data.srcIp);
+          const dstPos = getPos(data.dstIp);
 
           if (srcPos && dstPos && !srcPos.equals(dstPos)) {
             const ids = [data.srcIp, data.dstIp].sort();

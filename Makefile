@@ -9,9 +9,9 @@ build-server: build-web
 	docker build -f server/Dockerfile --target export --output type=local,dest=./build .
 
 build-web: generate-web-proto
+	docker build -f web/build.Dockerfile -t mikaboshi-web-builder web --output type=local,dest=./build/web/new
 	rm -rf build/web/dist
-	mkdir -p build/web/dist
-	docker build -f web/build.Dockerfile -t mikaboshi-web-builder web --output type=local,dest=./build/web/dist
+	mv build/web/new build/web/dist
 
 generate-web-proto:
 	docker build -f web/proto.Dockerfile -t mikaboshi-proto-generator web
