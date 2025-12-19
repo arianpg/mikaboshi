@@ -599,7 +599,7 @@ export default function TrafficVisualizer() {
               // If Peer is 'src', it is sending (OUT)
               // If Peer is 'dst', it is receiving (IN)
               if (role === 'src') {
-                if (data.srcPort && data.srcPort !== 0) currentPeers[ip].portsOut.add(data.srcPort);
+                if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsOut.add(data.dstPort);
               } else {
                 if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsIn.add(data.dstPort);
               }
