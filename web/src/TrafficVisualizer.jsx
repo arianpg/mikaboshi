@@ -18,12 +18,13 @@ const getPosition = (index, total) => {
 
 // --- Components ---
 
-function Agent({ label, position }) {
+function Agent({ label, position, isSelected, onClick }) {
   const groupRef = useRef();
   const coreRef = useRef();
   const shell1Ref = useRef();
   const shell2Ref = useRef();
   const ringRef = useRef();
+  const [hovered, setHover] = useState(false);
 
   useFrame((state, delta) => {
     const t = state.clock.getElapsedTime();
@@ -56,18 +57,32 @@ function Agent({ label, position }) {
     }
   });
 
+  const glowColor = isSelected ? "#ffee00" : "#00ffff"; // Gold if selected, else Cyan
+
   return (
     <group ref={groupRef} position={position || [0, 2, 0]}>
+      {/* Interactive Hit Area */}
+      <mesh
+        visible={false}
+        onClick={(e) => { e.stopPropagation(); onClick(label); }}
+        onPointerOver={() => setHover(true)}
+        onPointerOut={() => setHover(false)}
+      >
+        {/* Bigger hit area for Agent */}
+        <sphereGeometry args={[2.5, 16, 16]} />
+        <meshBasicMaterial />
+      </mesh>
+
       {/* Core Sphere (Glowing) */}
       <mesh ref={coreRef}>
         <sphereGeometry args={[0.8, 32, 32]} />
         <meshStandardMaterial
-          color="#00ffff"
-          emissive="#00ffff"
-          emissiveIntensity={2}
+          color={glowColor}
+          emissive={glowColor}
+          emissiveIntensity={hovered ? 3 : 2}
           toneMapped={false}
         />
-        <pointLight color="#00ffff" intensity={2} distance={5} />
+        <pointLight color={glowColor} intensity={2} distance={5} />
       </mesh>
 
       {/* Wireframe Shell 1 */}
@@ -86,7 +101,7 @@ function Agent({ label, position }) {
       <group rotation={[Math.PI / 2, 0, 0]}>
         <mesh ref={ringRef}>
           <ringGeometry args={[1.8, 1.9, 64, 1, 0, Math.PI * 1.5]} />
-          <meshBasicMaterial color="#00ffff" side={THREE.DoubleSide} transparent opacity={0.5} />
+          <meshBasicMaterial color={glowColor} side={THREE.DoubleSide} transparent opacity={0.5} />
         </mesh>
         <mesh rotation={[0, 0, Math.PI]}>
           <ringGeometry args={[1.6, 1.65, 64, 1, 0, Math.PI]} />
@@ -97,10 +112,10 @@ function Agent({ label, position }) {
       {/* Base "Magic Circle" on floor */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -1.5, 0]}>
         <ringGeometry args={[2, 2.2, 64]} />
-        <meshBasicMaterial color="#00ffff" transparent opacity={0.2} />
+        <meshBasicMaterial color={glowColor} transparent opacity={0.2} />
       </mesh>
 
-      <Text position={[0, 2.5, 0]} fontSize={0.5} color="#00ffff" anchorX="center" anchorY="middle">
+      <Text position={[0, 2.5, 0]} fontSize={0.5} color={glowColor} anchorX="center" anchorY="middle">
         {label || "Agent"}
       </Text>
     </group>
@@ -328,17 +343,21 @@ function DespawnEffect({ position, onComplete }) {
 }
 
 // --- Info Panel Component ---
-function InfoPanel({ peerIp, peerData, onClose }) {
+// --- Info Panel Component ---
+function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose }) {
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const targetIp = peerIp || agentIp;
+  const isAgent = !!agentIp;
 
   const fetchDetails = () => {
     setLoading(true);
     setError(null);
     setDetails(null);
 
-    fetch(`https://ipapi.co/${peerIp}/json/`)
+    fetch(`https://ipapi.co/${targetIp}/json/`)
       .then(res => {
         if (!res.ok) throw new Error(res.statusText || 'Fetch failed');
         return res.json();
@@ -354,14 +373,14 @@ function InfoPanel({ peerIp, peerData, onClose }) {
       });
   };
 
-  // Reset state when peerIp changes
+  // Reset state when targetIp changes
   useEffect(() => {
     setDetails(null);
     setLoading(false);
     setError(null);
-  }, [peerIp]);
+  }, [targetIp]);
 
-  if (!peerIp) return null;
+  if (!targetIp) return null;
 
   // Render ports logic
   const renderPorts = (pData) => {
@@ -386,8 +405,8 @@ function InfoPanel({ peerIp, peerData, onClose }) {
       right: '20px',
       width: '300px',
       background: 'rgba(0, 10, 20, 0.9)',
-      border: '1px solid #00ffcc',
-      color: '#00ffcc',
+      border: `1px solid ${isAgent ? '#ffee00' : '#00ffcc'}`,
+      color: isAgent ? '#ffee00' : '#00ffcc',
       padding: '20px',
       fontFamily: 'monospace',
       borderRadius: '8px',
@@ -395,19 +414,31 @@ function InfoPanel({ peerIp, peerData, onClose }) {
       zIndex: 1000
     }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-        <h3 style={{ margin: 0 }}>PEER DETAILS</h3>
+        <h3 style={{ margin: 0 }}>{isAgent ? 'AGENT DETAILS' : 'PEER DETAILS'}</h3>
         <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: '#ff0055', cursor: 'pointer', fontSize: '16px' }}>X</button>
       </div>
 
-      <div><strong>IP:</strong> {peerIp}</div>
-      <div><strong>Last Seen:</strong> {new Date(peerData?.lastSeen).toLocaleTimeString()}</div>
-      <div><strong>Speed:</strong> {((peerData?.volume || 0) * 2 / 1024).toFixed(2)} KB/s</div>
-      <div><strong>Protocols:</strong> {peerData?.protocols ? Array.from(peerData.protocols).join(', ') : 'N/A'}</div>
-      <div><strong>Ports:</strong> {renderPorts(peerData)}</div>
+      <div><strong>IP:</strong> {targetIp}</div>
+      {/* For Agent, maybe we don't have volume/protocols logic wired up effectively yet in visualizer state for 'agentsRef' */}
+      <div><strong>Last Seen:</strong> {new Date((peerData || agentData)?.lastSeen).toLocaleTimeString()}</div>
+
+      {!isAgent && (
+        <>
+          <div><strong>Speed:</strong> {((peerData?.volume || 0) * 2 / 1024).toFixed(2)} KB/s</div>
+          <div><strong>Protocols:</strong> {peerData?.protocols ? Array.from(peerData.protocols).join(', ') : 'N/A'}</div>
+          <div><strong>Ports:</strong> {renderPorts(peerData)}</div>
+        </>
+      )}
+
+      {isAgent && (
+        <div style={{ marginTop: '10px', fontStyle: 'italic', color: '#cccc00' }}>
+          Active Agent Node
+        </div>
+      )}
 
       <hr style={{ borderColor: '#004444' }} />
 
-      {!details && !loading && !error && (
+      {!details && !loading && !error && !isPrivateIP(targetIp) && (
         <button
           onClick={fetchDetails}
           style={{
@@ -461,7 +492,8 @@ export default function TrafficVisualizer() {
 
   // Interaction State
   const [selectedPeer, setSelectedPeer] = useState(null);
-  const [draggingPeer, setDraggingPeer] = useState(null);
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [draggingTarget, setDraggingTarget] = useState(null); // { id: string, type: 'peer' | 'agent' }
   const orbitRef = useRef();
 
 
@@ -736,29 +768,31 @@ export default function TrafficVisualizer() {
   // Handlers
   const handlePeerClick = (ip) => {
     setSelectedPeer(ip);
+    setSelectedAgent(null);
   };
 
-  const handleDragStart = (ip) => {
-    setDraggingPeer(ip);
+  const handleAgentClick = (ip) => {
+    setSelectedAgent(ip);
+    setSelectedPeer(null);
+  }
+
+  const handleDragStart = (id, type) => {
+    setDraggingTarget({ id, type });
     if (orbitRef.current) orbitRef.current.enabled = false;
   }
 
   const handleDragEnd = () => {
-    setDraggingPeer(null);
+    setDraggingTarget(null);
     if (orbitRef.current) orbitRef.current.enabled = true;
   }
 
   const handleDrag = (point) => {
-    if (draggingPeer && peersRef.current[draggingPeer]) {
-      const p = peersRef.current[draggingPeer];
-      // Create NEW Vector3 to ensure React detects change (or use mutation if referencing same object in render, but new Ref allows safer updates)
-      // Actually, simply mutating p.position IS reflected if we setPeersState with shallow copy, causing re-render.
-      // But passing the SAME Vector3 object as prop might be ignored by R3F reconciliation?
-      // Let's create a NEW Vector3 to be safe.
-      p.position = new THREE.Vector3(point.x, point.y, point.z);
-
-      // Force update by creating new object reference for state
-      setPeersState({ ...peersRef.current });
+    if (draggingTarget) {
+      if (draggingTarget.type === 'peer' && peersRef.current[draggingTarget.id]) {
+        const p = peersRef.current[draggingTarget.id];
+        p.position = new THREE.Vector3(point.x, point.y, point.z);
+        setPeersState({ ...peersRef.current });
+      }
     }
   }
 
@@ -781,15 +815,23 @@ export default function TrafficVisualizer() {
             but using onPointerMove on Peer itself is tricky because the mesh moves under cursor.
             Ideally we drag on a plane.
          */}
-        {draggingPeer && (
+        {/* Invisible Plane for Raycasting during drag */}
+        {draggingTarget && (
           <mesh visible={false} onPointerMove={(e) => handleDrag(e.point)} rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]}>
             <planeGeometry args={[200, 200]} />
           </mesh>
         )}
 
         {/* Render Agents */}
+
         {Object.entries(agentsState).map(([ip, agent]) => (
-          <Agent key={ip} label={ip} position={agent.position} />
+          <Agent
+            key={ip}
+            label={ip}
+            position={agent.position}
+            isSelected={selectedAgent === ip}
+            onClick={handleAgentClick}
+          />
         ))}
         {/* If no agents detected yet, show default placeholder? Or nothing? 
             Let's show a default placeholder if empty to imply system is ready. 
@@ -805,9 +847,9 @@ export default function TrafficVisualizer() {
             isHot={data.isHot}
             isSelected={ip === selectedPeer}
             onClick={handlePeerClick}
-            onDragStart={handleDragStart}
+            onDragStart={(id) => handleDragStart(id, 'peer')}
             onDragEnd={handleDragEnd}
-            onDrag={handleDrag} // Fallback if passing directly to peer
+            onDrag={handleDrag}
           />
         ))}
 
@@ -822,11 +864,13 @@ export default function TrafficVisualizer() {
       </Canvas>
 
       {/* UI Overlay */}
-      {selectedPeer && (
+      {(selectedPeer || selectedAgent) && (
         <InfoPanel
           peerIp={selectedPeer}
-          peerData={peersRef.current[selectedPeer]}
-          onClose={() => setSelectedPeer(null)}
+          peerData={selectedPeer ? peersRef.current[selectedPeer] : null}
+          agentIp={selectedAgent}
+          agentData={selectedAgent ? agentsRef.current[selectedAgent] : null}
+          onClose={() => { setSelectedPeer(null); setSelectedAgent(null); }}
         />
       )}
     </div>
