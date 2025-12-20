@@ -28,6 +28,6 @@ generate-web-proto:
 	docker run --rm -v $(PWD):/workspace mikaboshi-proto-generator \
 		-I=proto --plugin=protoc-gen-ts_proto=/usr/local/bin/protoc-gen-ts_proto \
 		--ts_proto_out=web/src/proto \
-		--ts_proto_opt=outputServices=default,env=browser,useObservables=true,esModuleInterop=true \
+		--ts_proto_opt=outputServices=default,env=browser,useObservables=true,esModuleInterop=true,outputClientImpl=grpc-web \
 		packet.proto
 	

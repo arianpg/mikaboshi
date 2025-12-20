@@ -490,8 +490,7 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose }) {
 
 import { retry, delay, repeat } from 'rxjs/operators';
 import { timer } from 'rxjs';
-import { AgentServiceClientImpl, Empty } from './proto/packet';
-import { GrpcWebImpl } from './proto/GrpcWebImpl';
+import { AgentServiceClientImpl, Empty, GrpcWebImpl } from './proto/packet';
 
 export default function TrafficVisualizer() {
   // useRefs for data (Source of Truth)
