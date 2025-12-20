@@ -1,0 +1,12 @@
+services:
+  server:
+    container_name: mikaboshi-server
+    image: arianpg/mikaboshi-server:latest
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      - GRPC_PORT=50051
+      - HTTP_PORT=8080
+      - PEER_TIMEOUT=30
+      - CHANNEL_CAPACITY=1000
