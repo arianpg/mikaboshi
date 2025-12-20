@@ -1,6 +1,9 @@
-.PHONY: build build-agent build-agent-windows build-server build-web generate-web-proto
+.PHONY: build build-agent build-agent-windows build-server build-web generate-web-proto build-docker-server
 
 build-all: build-agent build-agent-windows build-server
+
+build-docker-server: build-server
+	docker build -f server/runtime.Dockerfile -t mikaboshi-server:latest build/server
 
 build-agent:
 	mkdir -p build/agent

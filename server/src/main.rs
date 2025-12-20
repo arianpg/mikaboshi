@@ -77,19 +77,19 @@ use clap::Parser;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Port for the gRPC server (including gRPC-Web)
-    #[arg(long, default_value_t = 50051)]
+    #[arg(long, env = "GRPC_PORT", default_value_t = 50051)]
     grpc_port: u16,
 
     /// Port for the HTTP server (static files)
-    #[arg(long, default_value_t = 8080)]
+    #[arg(long, env = "HTTP_PORT", default_value_t = 8080)]
     http_port: u16,
 
     /// Capacity of the broadcast channel (buffer size)
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, env = "CHANNEL_CAPACITY", default_value_t = 4096)]
     channel_capacity: usize,
 
     /// Timeout for peer inactivity (seconds)
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, env = "PEER_TIMEOUT", default_value_t = 30)]
     peer_timeout: u64,
 }
 

@@ -42,6 +42,9 @@ make build-agent-windows
 
 # サーバーとWebフロントエンドをビルド
 make build-server
+
+# サーバーのDockerイメージをビルド
+make build-docker-server
 ```
 
 ## 実行方法
