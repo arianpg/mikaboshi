@@ -5,9 +5,6 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
-
 jobs:
   build-agent-linux:
     runs-on: ubuntu-latest
@@ -62,6 +59,8 @@ jobs:
   create-release:
     needs: [build-agent-linux, build-agent-windows, build-server]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download Agent (Linux)
         uses: actions/download-artifact@v4
