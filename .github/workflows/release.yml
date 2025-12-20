@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-agent-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Agent (Linux)
+        run: make build-agent
+
+      - name: Upload Agent (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mikaboshi-agent-linux
+          path: build/agent/mikaboshi-agent
+
+  build-agent-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Agent (Windows)
+        run: make build-agent-windows
+
+      - name: Upload Agent (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mikaboshi-agent-windows
+          path: build/agent/mikaboshi-agent.exe
+
+  build-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Server
+        run: make build-server
+
+      - name: Zip Server
+        run: |
+          cd build/server
+          zip -r ../mikaboshi-server.zip .
+
+      - name: Upload Server
+        uses: actions/upload-artifact@v4
+        with:
+          name: mikaboshi-server.zip
+          path: build/mikaboshi-server.zip
+
+  create-release:
+    needs: [build-agent-linux, build-agent-windows, build-server]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Agent (Linux)
+        uses: actions/download-artifact@v4
+        with:
+          name: mikaboshi-agent-linux
+          path: .
+
+      - name: Download Agent (Windows)
+        uses: actions/download-artifact@v4
+        with:
+          name: mikaboshi-agent-windows
+          path: .
+
+      - name: Download Server
+        uses: actions/download-artifact@v4
+        with:
+          name: mikaboshi-server.zip
+          path: .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            mikaboshi-agent
+            mikaboshi-agent.exe
+            mikaboshi-server.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -3,21 +3,22 @@
 build-all: build-agent build-agent-windows build-server
 
 build-agent:
-	mkdir -p build
-	docker build -f agent/Dockerfile --target export --output type=local,dest=./build .
+	mkdir -p build/agent
+	docker build -f agent/Dockerfile --target export --output type=local,dest=./build/agent .
 
 build-agent-windows:
-	mkdir -p build
-	docker build -f agent/Dockerfile.windows --target export --output type=local,dest=./build .
+	mkdir -p build/agent
+	docker build -f agent/Dockerfile.windows --target export --output type=local,dest=./build/agent .
 
 build-server: build-web
-	mkdir -p build
-	docker build -f server/Dockerfile --target export --output type=local,dest=./build .
+	mkdir -p build/server
+	docker build -f server/Dockerfile --target export --output type=local,dest=./build/server .
 
 build-web: generate-web-proto
-	docker build -f web/build.Dockerfile -t mikaboshi-web-builder web --output type=local,dest=./build/web/new
-	rm -rf build/web/dist
-	mv build/web/new build/web/dist
+	mkdir -p build/server/web
+	docker build -f web/build.Dockerfile -t mikaboshi-web-builder web --output type=local,dest=./build/server/web/new
+	rm -rf build/server/web/dist
+	mv build/server/web/new build/server/web/dist
 
 generate-web-proto:
 	docker build -f web/proto.Dockerfile -t mikaboshi-proto-generator web
