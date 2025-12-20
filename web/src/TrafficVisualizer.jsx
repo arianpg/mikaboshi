@@ -153,6 +153,7 @@ function Peer({ ip, position, isHot, isSelected, onClick, onDragStart, onDragEnd
   const ring1Ref = useRef();
   const ring2Ref = useRef();
   const ring3Ref = useRef();
+  const decoRef = useRef();
   const [hovered, setHover] = useState(false);
 
   // Color Logic
@@ -180,6 +181,12 @@ function Peer({ ip, position, isHot, isSelected, onClick, onDragStart, onDragEnd
     if (ring1Ref.current) ring1Ref.current.rotation.z -= delta * 0.5;
     if (ring2Ref.current) ring2Ref.current.rotation.z += delta * 0.3;
     if (ring3Ref.current) ring3Ref.current.rotation.z -= delta * 1.0;
+
+    // Deco Rotation
+    if (decoRef.current) {
+      decoRef.current.rotation.z += delta * 0.2;
+      decoRef.current.rotation.x += delta * 0.1;
+    }
   });
 
   return (
@@ -213,44 +220,53 @@ function Peer({ ip, position, isHot, isSelected, onClick, onDragStart, onDragEnd
 
       {/* Visual Representation: Flat Disc (Standing Up) */}
       <group rotation={[Math.PI / 2, 0, 0]}>
-        {/* Main Disc Body */}
+        {/* Main Disc Body (Transparent Glassy) */}
         <mesh position={[0, 0, 0]}>
-          <cylinderGeometry args={[1.5, 1.5, 0.1, 32]} />
+          <cylinderGeometry args={[1.5, 1.5, 0.05, 32]} />
           <meshStandardMaterial
             color="#001122"
             emissive={baseColor}
             emissiveIntensity={hovered ? 0.5 : 0.2}
+            transparent
+            opacity={0.3}
+            roughness={0.1}
+            metalness={0.8}
           />
+        </mesh>
 
+        {/* Decoration Wireframe (Tech Core) */}
+        <mesh ref={decoRef} position={[0, 0, 0]}>
+          <octahedronGeometry args={[1.1, 0]} />
+          <meshBasicMaterial color={baseColor} wireframe transparent opacity={0.15} />
         </mesh>
 
         {/* Outer Ring (Static) */}
-        <mesh position={[0, 0.06, 0]}>
-          <ringGeometry args={[1.5, 1.6, 64]} />
-          <meshBasicMaterial color={glowColor} side={THREE.DoubleSide} />
+        <mesh position={[0, 0.03, 0]}>
+          <ringGeometry args={[1.5, 1.55, 64]} />
+          <meshBasicMaterial color={glowColor} side={THREE.DoubleSide} transparent opacity={0.8} />
         </mesh>
 
         {/* Rotating Arc 1 (Slow, Large) */}
-        <mesh ref={ring1Ref} position={[0, 0.07, 0]}>
-          <ringGeometry args={[1.2, 1.3, 32, 1, 0, Math.PI * 1.5]} />
-          <meshBasicMaterial color={baseColor} transparent opacity={0.6} side={THREE.DoubleSide} />
-        </mesh>
-
-        {/* Rotating Arc 2 (Counter-rotate, Medium) */}
-        <mesh ref={ring2Ref} position={[0, 0.08, 0]} rotation={[0, 0, 1]}>
-          <ringGeometry args={[0.9, 1.0, 32, 1, 0, Math.PI]} />
+        <mesh ref={ring1Ref} position={[0, 0.04, 0]}>
+          <ringGeometry args={[1.3, 1.4, 32, 1, 0, Math.PI * 1.5]} />
           <meshBasicMaterial color={baseColor} transparent opacity={0.4} side={THREE.DoubleSide} />
         </mesh>
 
+        {/* Rotating Arc 2 (Counter-rotate, Medium) */}
+        <mesh ref={ring2Ref} position={[0, 0.05, 0]} rotation={[0, 0, 1]}>
+          <ringGeometry args={[1.0, 1.1, 32, 1, 0, Math.PI]} />
+          <meshBasicMaterial color={baseColor} transparent opacity={0.3} side={THREE.DoubleSide} />
+        </mesh>
+
         {/* Rotating Arc 3 (Fast, Small bits) */}
-        <mesh ref={ring3Ref} position={[0, 0.09, 0]}>
-          <ringGeometry args={[0.6, 0.7, 16, 1, 0, Math.PI * 0.5]} />
-          <meshBasicMaterial color={glowColor} transparent opacity={0.8} side={THREE.DoubleSide} />
+        <mesh ref={ring3Ref} position={[0, 0.06, 0]}>
+          <ringGeometry args={[0.7, 0.8, 16, 1, 0, Math.PI * 0.5]} />
+          <meshBasicMaterial color={glowColor} transparent opacity={0.5} side={THREE.DoubleSide} />
         </mesh>
 
         {/* Text Label (IP) */}
         <Text
-          position={[0, 0.1, 0]}
+          position={[0, 0.5, 0]} // Lifted up slightly
           rotation={[-Math.PI / 2, 0, 0]} // Face UP (local Y) -> Face Target (World Z)
           fontSize={0.4}
           color={isSelected ? "#ffffff" : "#cccccc"}
