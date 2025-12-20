@@ -15,11 +15,16 @@ jobs:
       - name: Build Agent (Linux)
         run: make build-agent
 
+      - name: Zip Agent (Linux)
+        run: |
+          cd build/agent
+          zip -r ../../mikaboshi-agent-linux.zip .
+
       - name: Upload Agent (Linux)
         uses: actions/upload-artifact@v4
         with:
           name: mikaboshi-agent-linux
-          path: build/agent/mikaboshi-agent
+          path: mikaboshi-agent-linux.zip
 
   build-agent-windows:
     runs-on: ubuntu-latest
@@ -30,11 +35,16 @@ jobs:
       - name: Build Agent (Windows)
         run: make build-agent-windows
 
+      - name: Zip Agent (Windows)
+        run: |
+          cd build/agent
+          zip -r ../../mikaboshi-agent-windows.zip .
+
       - name: Upload Agent (Windows)
         uses: actions/upload-artifact@v4
         with:
           name: mikaboshi-agent-windows
-          path: build/agent/mikaboshi-agent.exe
+          path: mikaboshi-agent-windows.zip
 
   docker-server:
     needs: build-server
@@ -123,8 +133,8 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            mikaboshi-agent
-            mikaboshi-agent.exe
+            mikaboshi-agent-linux.zip
+            mikaboshi-agent-windows.zip
             mikaboshi-server.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

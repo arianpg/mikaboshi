@@ -22,3 +22,4 @@ RUN cargo build --release
 # Export stage
 FROM scratch AS export
 COPY --from=builder /app/agent/target/release/mikaboshi-agent /mikaboshi-agent
+COPY agent/THIRD_PARTY_LICENSES /THIRD_PARTY_LICENSES

@@ -104,3 +104,17 @@ make build-docker-server
 ## ライセンス
 
 MIT License
+
+### Third Party Licenses
+
+This software uses the following third-party software:
+
+*   **libpcap**
+    *   License: BSD 3-Clause License
+    *   Copyright (c) The Tcpdump Group
+*   **protobufjs**
+    *   License: BSD 3-Clause License
+    *   Copyright (c) 2016, Daniel Wirtz
+*   **google-protobuf**
+    *   License: BSD 3-Clause License
+    *   Copyright (c) Google Inc.
