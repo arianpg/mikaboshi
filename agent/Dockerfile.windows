@@ -1,0 +1,36 @@
+FROM rust:1.83-bullseye AS builder
+
+# Install MinGW-w64 toolchain and other dependencies
+RUN apt-get update && apt-get install -y \
+    mingw-w64 \
+    wget \
+    unzip \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Windows target
+RUN rustup target add x86_64-pc-windows-gnu
+
+# Download and extract Npcap SDK
+WORKDIR /tmp
+RUN wget https://npcap.com/dist/npcap-sdk-1.13.zip && \
+    unzip npcap-sdk-1.13.zip -d /opt/npcap-sdk
+
+# Set environment variables for pcap crate
+ENV LIBPCAP_LIBDIR=/opt/npcap-sdk/Lib/x64
+ENV LIBPCAP_INCLUDE_DIR=/opt/npcap-sdk/Include
+
+WORKDIR /app
+
+# Copy source code
+COPY agent /app/agent
+COPY proto /app/proto
+
+WORKDIR /app/agent
+
+# Build for Windows using the GNU toolchain
+RUN cargo build --release --target x86_64-pc-windows-gnu
+
+# Export stage
+FROM scratch AS export
+COPY --from=builder /app/agent/target/x86_64-pc-windows-gnu/release/mikaboshi-agent.exe /mikaboshi-agent.exe

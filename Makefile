@@ -1,8 +1,12 @@
-.PHONY: build build-agent build-server build-web
+.PHONY: build build-agent	 build-server build-web
 
 build-agent:
 	mkdir -p build
 	docker build -f agent/Dockerfile --target export --output type=local,dest=./build .
+
+build-agent-windows:
+	mkdir -p build
+	docker build -f agent/Dockerfile.windows --target export --output type=local,dest=./build .
 
 build-server: build-web
 	mkdir -p build

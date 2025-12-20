@@ -33,6 +33,9 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     ipv6: bool,
+
+    #[arg(long, default_value_t = false)]
+    list_devices: bool,
 }
 
 #[tokio::main]
@@ -44,6 +47,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         format!("http://{}", args.server)
     };
+
+    if args.list_devices {
+        match Device::list() {
+            Ok(devices) => {
+                println!("Available devices:");
+                for device in devices {
+                    println!("  Name: {}", device.name);
+                    println!("  Description: {:?}", device.desc);
+                    for address in device.addresses {
+                        println!("    Address: {:?}", address.addr);
+                    }
+                    println!();
+                }
+            }
+            Err(e) => eprintln!("Failed to list devices: {}", e),
+        }
+        return Ok(());
+    }
 
     println!("Connecting to {}", server_url);
     let client = AgentServiceClient::connect(server_url).await?;
