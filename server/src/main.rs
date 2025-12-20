@@ -83,6 +83,10 @@ struct Args {
     /// Port for the HTTP server (static files)
     #[arg(long, default_value_t = 8080)]
     http_port: u16,
+
+    /// Capacity of the broadcast channel (buffer size)
+    #[arg(long, default_value_t = 4096)]
+    channel_capacity: usize,
 }
 
 #[tokio::main]
@@ -92,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Channel for broadcasting packets
-    let (tx, _rx) = broadcast::channel(100);
+    let (tx, _rx) = broadcast::channel(args.channel_capacity);
 
     // --- gRPC Server (including gRPC-Web) ---
     let grpc_addr = SocketAddr::from(([0, 0, 0, 0], args.grpc_port));
