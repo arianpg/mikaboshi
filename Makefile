@@ -1,4 +1,6 @@
-.PHONY: build build-agent	 build-server build-web
+.PHONY: build build-agent build-agent-windows build-server build-web generate-web-proto
+
+build-all: build-agent build-agent-windows build-server
 
 build-agent:
 	mkdir -p build
