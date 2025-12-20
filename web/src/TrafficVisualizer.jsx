@@ -7,7 +7,7 @@ import * as THREE from 'three';
 // --- Constants ---
 const PEER_RADIUS = 15;
 const TRAFFIC_SPEED = 0.5;
-const PEER_TIMEOUT = 60000; // 1 minute
+// const PEER_TIMEOUT = 60000; // 1 minute (Moved to Config)
 const AGENT_CLUSTER_RADIUS = 4; // Radius for multiple agents
 
 // --- Helper: Generate Position on Circle ---
@@ -498,6 +498,7 @@ export default function TrafficVisualizer() {
   const peersRef = useRef({});
   const agentsRef = useRef({}); // Store agents data
   const linksRef = useRef({});
+  const timeoutRef = useRef(30000); // Default 30s, updated by config
   // const ws = useRef(null); // No longer needed
 
   // State
@@ -528,6 +529,9 @@ export default function TrafficVisualizer() {
         const host = window.location.hostname;
         // Use fetched port
         const port = config.grpcPort || '50051';
+        if (config.peerTimeout) {
+          timeoutRef.current = config.peerTimeout;
+        }
         const serverUrl = `${protocol}//${host}:${port}`;
 
         console.log('Connecting to gRPC-Web Server at', serverUrl);
@@ -708,7 +712,7 @@ export default function TrafficVisualizer() {
         // Skip timeout for selected peer
         const isSelected = (key === selectedPeer);
 
-        if (!isSelected && now - currentPeers[key].lastSeen > PEER_TIMEOUT) {
+        if (!isSelected && now - currentPeers[key].lastSeen > timeoutRef.current) {
           newEffects.push({ id: key + '-' + now, position: currentPeers[key].position });
           delete currentPeers[key];
           peersChanged = true;

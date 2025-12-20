@@ -87,6 +87,10 @@ struct Args {
     /// Capacity of the broadcast channel (buffer size)
     #[arg(long, default_value_t = 4096)]
     channel_capacity: usize,
+
+    /// Timeout for peer inactivity (seconds)
+    #[arg(long, default_value_t = 30)]
+    peer_timeout: u64,
 }
 
 #[tokio::main]
@@ -128,7 +132,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/config", axum::routing::get(move || async move {
             axum::Json(serde_json::json!({
-                "grpcPort": args.grpc_port
+                "grpcPort": args.grpc_port,
+                "peerTimeout": args.peer_timeout * 1000 // Convert to ms
             }))
         }))
         .nest_service("/", ServeDir::new("web/dist"));
