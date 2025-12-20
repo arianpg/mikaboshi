@@ -48,6 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("http://{}", args.server)
     };
 
+    let server_port = extract_port(&args.server).unwrap_or(50051);
+
     if args.list_devices {
         match Device::list() {
             Ok(devices) => {
@@ -66,8 +68,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("Connecting to {}", server_url);
-    let client = AgentServiceClient::connect(server_url).await?;
+    loop {
+        println!("Connecting to {}", server_url);
+        
+        match run_agent(&server_url, &args, server_port).await {
+            Ok(_) => {
+                println!("Agent stopped normally.");
+                break;
+            },
+            Err(e) => {
+                eprintln!("Agent disconnected or failed: {}", e);
+                println!("Reconnecting in 5 seconds...");
+                sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_port(addr: &str) -> Option<u16> {
+    // Remove protocol if present
+    let clean_addr = addr.trim_start_matches("http://").trim_start_matches("https://");
+    
+    // Find last colon
+    if let Some(idx) = clean_addr.rfind(':') {
+        if let Ok(port) = clean_addr[idx+1..].parse::<u16>() {
+            return Some(port);
+        }
+    }
+    None
+}
+
+async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let client = AgentServiceClient::connect(server_url.to_string()).await?;
+    println!("Connected to server");
 
     // Create a channel for streaming packets
     let (tx, rx) = mpsc::channel(100);
@@ -75,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn the gRPC client stream handler
     let mut client_clone = client.clone();
-    tokio::spawn(async move {
+    let stream_handle = tokio::spawn(async move {
         match client_clone.stream_packets(request_stream).await {
             Ok(response) => println!("Stream completed: {:?}", response),
             Err(e) => eprintln!("Stream error: {}", e),
@@ -87,27 +122,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         generate_mock_traffic(tx).await;
     } else {
         println!("Starting in LIVE capture mode on device {}", args.device);
-        // We clone tx because if live capture fails, we might want to use it for mock (though here we just exit or fallback)
         let tx_clone = tx.clone();
         let args_clone = args.clone();
         
-        // pcap capture blocks, so we run it in a blocking thread or just here if we don't need to do other things
-        // But since we are in tokio main, we should use spawn_blocking for pcap
+        // pcap capture blocks
         let result = tokio::task::spawn_blocking(move || {
-            run_live_capture(args_clone, tx_clone)
+            run_live_capture(args_clone, tx_clone, server_port)
         }).await?;
 
         if let Err(e) = result {
-            eprintln!("Error opening device {}: {}", args.device, e);
-            eprintln!("Falling back to MOCK mode due to error.");
-            generate_mock_traffic(tx).await;
+             eprintln!("Error opening device {}: {}", args.device, e);
+             eprintln!("Falling back to MOCK mode due to error.");
+             generate_mock_traffic(tx).await;
         }
     }
+    
+    // Wait for stream to finish (which means disconnected)
+    let _ = stream_handle.await;
 
-    Ok(())
+    // If we are here, it means connection lost or done
+    Err("Connection lost".into())
 }
 
-fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cap = Capture::from_device(args.device.as_str())?
         .promisc(args.promiscuous)
         .snaplen(args.snapshot)
@@ -115,9 +152,9 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>) -> Result<(), Box<dyn 
         .open()?;
 
     // Set BPF filter
-    let filter = "not port 50051";
+    let filter = format!("not port {}", server_port);
     println!("Setting BPF filter: {}", filter);
-    cap.filter(filter, true)?;
+    cap.filter(&filter, true)?;
     
     // Identify local IPs
     let mut local_ips = HashSet::new();
@@ -137,6 +174,12 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>) -> Result<(), Box<dyn 
     let datalink = cap.get_datalink();
 
     loop {
+        // We need a way to check if channel is closed to stop capture, 
+        // but pcap blocks. The timeout(1000) helps us yield.
+        if tx.is_closed() {
+            return Ok(());
+        }
+
         match cap.next_packet() {
             Ok(packet) => {
                 use etherparse::{PacketHeaders, IpHeader, TransportHeader};
@@ -146,24 +189,19 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>) -> Result<(), Box<dyn 
                     Linktype(1) => PacketHeaders::from_ethernet_slice(packet.data),
                     Linktype(113) => {
                          // Linux SLL (Cooked)
-                         // Header is 16 bytes. The last 2 bytes are the protocol (EtherType).
-                         // If we just skip 16 bytes, we should be at the network layer (IP).
                          if packet.data.len() > 16 {
                              PacketHeaders::from_ip_slice(&packet.data[16..])
                          } else {
-                             Err(etherparse::ReadError::UnexpectedEndOfSlice(0)) // Dummy error
+                             Err(etherparse::ReadError::UnexpectedEndOfSlice(0))
                          }
                     },
                      _ => {
-                         // Fallback or skip
                          PacketHeaders::from_ethernet_slice(packet.data)
                      }
                 };
 
                 // Try parsing
                 if let Ok(headers) = headers_result {
-                    // ... existing logic ...
-                    // ... existing logic ...
                     let mut src_ip = String::new();
                     let mut dst_ip = String::new();
                     let mut proto = String::new();
@@ -228,22 +266,14 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>) -> Result<(), Box<dyn 
                         if let Err(_) = tx.blocking_send(info) {
                             return Ok(()); // channel closed
                         }
-                    } else {
-                        // Log only periodically to avoid spam?
-                        // println!("No IP header found in packet of len {}", packet.data.len());
                     }
-                } else {
-                     // println!("Failed to parse ethernet packet");
                 }
             },
             Err(pcap::Error::TimeoutExpired) => {
-                // minimize cpu usage or check for exit 
                 continue;
             },
             Err(e) => {
                 eprintln!("Error reading packet: {}", e);
-                // Depending on error, we might want to break
-                // e.g. device went down
             }
         }
     }
@@ -258,6 +288,8 @@ async fn generate_mock_traffic(tx: mpsc::Sender<Packet>) {
         let delay = rng.gen_range(100..500);
         sleep(Duration::from_millis(delay)).await;
 
+        if tx.is_closed() { return; }
+
         let peer = peers[rng.gen_range(0..peers.len())];
         let (src, dst) = if rng.gen_bool(0.5) {
             ("127.0.0.1".to_string(), peer.to_string())
@@ -269,16 +301,13 @@ async fn generate_mock_traffic(tx: mpsc::Sender<Packet>) {
             r#type: "traffic".to_string(),
             src_ip: src,
             dst_ip: dst,
-            src_is_agent: false, // In mock, logic in Go didn't strictly set this but it defaults to false/true based on logic.
-            // Go mock: srcIsAgent/dstIsAgent were implied by '127.0.0.1' being in localIPs.
-            // Here we should probably mimic that.
+            src_is_agent: false,
             dst_is_agent: false,
             size: rng.gen_range(64..1000),
             proto: "TCP".to_string(),
             src_port: 0,
             dst_port: 0,
         };
-        // Refine is_agent logic for mock
         let mut info = info;
         if info.src_ip == "127.0.0.1" { info.src_is_agent = true; }
         if info.dst_ip == "127.0.0.1" { info.dst_is_agent = true; }

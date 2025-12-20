@@ -71,15 +71,31 @@ impl AgentService for GrpcService {
 }
 
 
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Port for the gRPC server (including gRPC-Web)
+    #[arg(long, default_value_t = 50051)]
+    grpc_port: u16,
+
+    /// Port for the HTTP server (static files)
+    #[arg(long, default_value_t = 8080)]
+    http_port: u16,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+
+    let args = Args::parse();
 
     // Channel for broadcasting packets
     let (tx, _rx) = broadcast::channel(100);
 
     // --- gRPC Server (including gRPC-Web) ---
-    let grpc_addr = "[::]:50051".parse()?;
+    let grpc_addr = SocketAddr::from(([0, 0, 0, 0], args.grpc_port));
     let grpc_service = GrpcService { tx: Some(tx.clone()) }; 
     
     // Enable gRPC-Web and CORS
@@ -106,9 +122,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- HTTP Server (Static Files) ---
     // Serve static files from web/dist
     let app = Router::new()
+        .route("/config", axum::routing::get(move || async move {
+            axum::Json(serde_json::json!({
+                "grpcPort": args.grpc_port
+            }))
+        }))
         .nest_service("/", ServeDir::new("web/dist"));
 
-    let http_addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let http_addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
     println!("HTTP server listening on {}", http_addr);
     
     let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();

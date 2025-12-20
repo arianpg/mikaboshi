@@ -518,160 +518,143 @@ export default function TrafficVisualizer() {
   };
 
   useEffect(() => {
-    // gRPC-Web Setup
-    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
-    const host = window.location.hostname;
-    // gRPC-Web on 50051
-    const port = '50051';
-    const serverUrl = `${protocol}//${host}:${port}`;
+    const init = async () => {
+      try {
+        const configRes = await fetch('/config');
+        const config = await configRes.json();
 
-    console.log('Connecting to gRPC-Web Server at', serverUrl);
+        // gRPC-Web Setup
+        const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+        const host = window.location.hostname;
+        // Use fetched port
+        const port = config.grpcPort || '50051';
+        const serverUrl = `${protocol}//${host}:${port}`;
 
-    const rpc = new GrpcWebImpl(serverUrl, { debug: false });
-    const client = new AgentServiceClientImpl(rpc);
+        console.log('Connecting to gRPC-Web Server at', serverUrl);
 
-    // Subscribe with Retry Logic
-    // retry: resubscribe on error
-    // repeat: resubscribe on complete (though server streaming usually doesn't complete unless server closes)
-    const sub = client.Subscribe(Empty.create({}))
-      .pipe(
-        // If error occurs, wait 2 seconds and retry.
-        retry({
-          delay: (errors) => errors.pipe(delay(2000))
-        }),
-        // If stream completes unexpectedly, restart it. 
-        // Note: 'repeat' usually restarts immediately on complete.
-        // We can add a delay if needed but server restart usually takes time so immediate retry might fail and trigger retry logic.
-        repeat({ delay: 3000 })
-      )
-      .subscribe({
-        next: (data) => {
-          // data is Packet object directly
-          if (data.type !== 'traffic') return;
+        const rpc = new GrpcWebImpl(serverUrl, { debug: false });
+        const client = new AgentServiceClientImpl(rpc);
 
-          const timestamp = Date.now();
+        // Subscribe with Retry Logic
+        const sub = client.Subscribe(Empty.create({}))
+          .pipe(
+            retry({
+              delay: (errors) => errors.pipe(delay(2000))
+            }),
+            repeat({ delay: 3000 })
+          )
+          .subscribe({
+            next: (data) => {
+              // data is Packet object directly
+              if (data.type !== 'traffic') return;
 
-          // Identity Check - Agents
-          const isLoopback = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
+              const timestamp = Date.now();
 
-          const registerAgent = (ip) => {
-            if (!ip || isLoopback(ip) || ip === "AGENT") return;
+              // Identity Check - Agents
+              const isLoopback = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
 
-            // Promote Peer to Agent if needed
-            if (peersRef.current[ip]) {
-              delete peersRef.current[ip];
-              // If selected, deselect to avoid issues
-              if (selectedPeer === ip) setSelectedPeer(null);
-              // Trigger peer update
-              setPeersState({ ...peersRef.current });
-            }
+              const registerAgent = (ip) => {
+                if (!ip || isLoopback(ip) || ip === "AGENT") return;
 
-            if (!agentsRef.current[ip]) {
-              agentsRef.current[ip] = {
-                ip: ip,
-                lastSeen: timestamp,
-                position: new THREE.Vector3(0, 2, 0) // Default
+                // Promote Peer to Agent if needed
+                if (peersRef.current[ip]) {
+                  delete peersRef.current[ip];
+                  if (selectedPeer === ip) setSelectedPeer(null);
+                  setPeersState({ ...peersRef.current });
+                }
+
+                if (!agentsRef.current[ip]) {
+                  agentsRef.current[ip] = {
+                    ip: ip,
+                    lastSeen: timestamp,
+                    position: new THREE.Vector3(0, 2, 0) // Default
+                  };
+                } else {
+                  agentsRef.current[ip].lastSeen = timestamp;
+                }
               };
-            } else {
-              agentsRef.current[ip].lastSeen = timestamp;
-            }
-          };
 
-          if (data.srcIsAgent) registerAgent(data.srcIp);
-          if (data.dstIsAgent) registerAgent(data.dstIp);
+              if (data.srcIsAgent) registerAgent(data.srcIp);
+              if (data.dstIsAgent) registerAgent(data.dstIp);
 
-          // Update Peers
-          const currentPeers = peersRef.current;
-          const processPeer = (ip, isAgent, role) => {
-            if (!ip) return;
-            // If it is an agent, we handled it above. DO NOT add to peers list.
-            if (isAgent) return;
-            // If it is KNOWN as an agent (even if this specific packet says false due to unidirectional visibility), SKIP.
-            if (agentsRef.current[ip]) return;
+              // Update Peers
+              const currentPeers = peersRef.current;
+              const processPeer = (ip, isAgent, role) => {
+                if (!ip) return;
+                if (isAgent) return;
+                if (agentsRef.current[ip]) return;
+                if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return;
 
-            // Also ignore simple loopback if not tagged as agent (unlikely in this context but good safety)
-            if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return;
-
-            if (!currentPeers[ip]) {
-              const angle = Math.random() * Math.PI * 2;
-              currentPeers[ip] = {
-                position: new THREE.Vector3(Math.cos(angle) * PEER_RADIUS, Math.random() * 5 - 2, Math.sin(angle) * PEER_RADIUS),
-                lastSeen: timestamp,
-                volume: 0,
-                protocols: new Set(),
-                portsIn: new Set(),
-                portsOut: new Set()
-              };
-              setPeersState({ ...currentPeers });
-            } else {
-              currentPeers[ip].lastSeen = timestamp;
-            }
-            if (currentPeers[ip]) {
-              currentPeers[ip].volume += data.size;
-              // Capture Protocol
-              if (data.proto) currentPeers[ip].protocols.add(data.proto);
-
-              // Capture Port
-              // If Peer is 'src', it is sending (OUT)
-              // If Peer is 'dst', it is receiving (IN)
-              if (role === 'src') {
-                if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsOut.add(data.dstPort);
-              } else {
-                if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsIn.add(data.dstPort);
+                if (!currentPeers[ip]) {
+                  const angle = Math.random() * Math.PI * 2;
+                  currentPeers[ip] = {
+                    position: new THREE.Vector3(Math.cos(angle) * PEER_RADIUS, Math.random() * 5 - 2, Math.sin(angle) * PEER_RADIUS),
+                    lastSeen: timestamp,
+                    volume: 0,
+                    protocols: new Set(),
+                    portsIn: new Set(),
+                    portsOut: new Set()
+                  };
+                  setPeersState({ ...currentPeers });
+                } else {
+                  currentPeers[ip].lastSeen = timestamp;
+                }
+                if (currentPeers[ip]) {
+                  currentPeers[ip].volume += data.size;
+                  if (data.proto) currentPeers[ip].protocols.add(data.proto);
+                  if (role === 'src') {
+                    if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsOut.add(data.dstPort);
+                  } else {
+                    if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsIn.add(data.dstPort);
+                  }
+                  if (currentPeers[ip].protocols.size > 5) currentPeers[ip].protocols = new Set(Array.from(currentPeers[ip].protocols).slice(-5));
+                  if (currentPeers[ip].portsIn.size > 5) currentPeers[ip].portsIn = new Set(Array.from(currentPeers[ip].portsIn).slice(-5));
+                  if (currentPeers[ip].portsOut.size > 5) currentPeers[ip].portsOut = new Set(Array.from(currentPeers[ip].portsOut).slice(-5));
+                }
               }
 
-              // Limit
-              if (currentPeers[ip].protocols.size > 5) currentPeers[ip].protocols = new Set(Array.from(currentPeers[ip].protocols).slice(-5));
-              if (currentPeers[ip].portsIn.size > 5) currentPeers[ip].portsIn = new Set(Array.from(currentPeers[ip].portsIn).slice(-5));
-              if (currentPeers[ip].portsOut.size > 5) currentPeers[ip].portsOut = new Set(Array.from(currentPeers[ip].portsOut).slice(-5));
-            }
-          }
+              processPeer(data.srcIp, data.srcIsAgent, 'src');
+              processPeer(data.dstIp, data.dstIsAgent, 'dst');
 
-          processPeer(data.srcIp, data.srcIsAgent, 'src');
-          processPeer(data.dstIp, data.dstIsAgent, 'dst');
-
-          // Traffic Links
-          const getPos = (ip) => {
-            // Check agents first
-            if (agentsRef.current[ip]) {
-              return agentsRef.current[ip].position;
-            }
-            // Ignore placeholders
-            if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost")
-              return new THREE.Vector3(0, 2, 0);
-
-            return currentPeers[ip]?.position || new THREE.Vector3(0, 0, 0);
-          };
-
-          const srcPos = getPos(data.srcIp);
-          const dstPos = getPos(data.dstIp);
-
-          if (srcPos && dstPos && !srcPos.equals(dstPos)) {
-            const ids = [data.srcIp, data.dstIp].sort();
-            const linkId = ids.join('-');
-
-            if (!linksRef.current[linkId]) {
-              linksRef.current[linkId] = {
-                start: srcPos,
-                end: dstPos,
-                volume: 0,
-                lastSeen: timestamp
+              // Traffic Links
+              const getPos = (ip) => {
+                if (agentsRef.current[ip]) return agentsRef.current[ip].position;
+                if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return new THREE.Vector3(0, 2, 0);
+                return currentPeers[ip]?.position || new THREE.Vector3(0, 0, 0);
               };
-            }
 
-            linksRef.current[linkId].volume += Math.max(data.size, 500);
-            linksRef.current[linkId].lastSeen = timestamp;
-            linksRef.current[linkId].start = srcPos;
-            linksRef.current[linkId].end = dstPos;
-          }
-        },
-        error: (err) => console.error('gRPC Error:', err),
-        complete: () => console.log('gRPC Stream Completed')
-      });
+              const srcPos = getPos(data.srcIp);
+              const dstPos = getPos(data.dstIp);
 
-    return () => {
-      sub.unsubscribe();
+              if (srcPos && dstPos && !srcPos.equals(dstPos)) {
+                const ids = [data.srcIp, data.dstIp].sort();
+                const linkId = ids.join('-');
+
+                if (!linksRef.current[linkId]) {
+                  linksRef.current[linkId] = {
+                    start: srcPos,
+                    end: dstPos,
+                    volume: 0,
+                    lastSeen: timestamp
+                  };
+                }
+
+                linksRef.current[linkId].volume += Math.max(data.size, 500);
+                linksRef.current[linkId].lastSeen = timestamp;
+                linksRef.current[linkId].start = srcPos;
+                linksRef.current[linkId].end = dstPos;
+              }
+            },
+            error: (err) => console.error('gRPC Error:', err),
+            complete: () => console.log('gRPC Stream Completed')
+          });
+      } catch (err) {
+        console.error("Failed to fetch config", err);
+      }
     };
+
+    init();
+
   }, []);
 
   // Sync Loop
