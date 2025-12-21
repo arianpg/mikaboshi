@@ -104,6 +104,10 @@ struct Args {
     /// Basic Auth Password
     #[arg(long, env = "BASIC_AUTH_PASSWORD")]
     basic_auth_password: Option<String>,
+
+    /// Threshold for traffic visualization coloring (bytes)
+    #[arg(long, env = "TRAFFIC_MAX_THRESHOLD", default_value_t = 1000000.0)]
+    traffic_max_threshold: f64,
 }
 
 #[tokio::main]
@@ -201,7 +205,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "peerTimeout": config_args_monitor.peer_timeout * 1000, // Convert to ms
                 "geoipEnabled": geoip_state.is_some(),
                 "geoipAttributionText": attr_text,
-                "geoipAttributionUrl": attr_url
+                "geoipAttributionUrl": attr_url,
+                "trafficMaxThreshold": config_args_monitor.traffic_max_threshold
             }))
         }))
         .route("/geoip/:ip", axum::routing::get(move |axum::extract::Path(ip): axum::extract::Path<String>| {

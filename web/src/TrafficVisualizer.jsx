@@ -175,14 +175,15 @@ function Peer({ ip, position, isHot, isSelected, onClick, onDragStart, onDragEnd
   const [hovered, setHover] = useState(false);
 
   // Color Logic
-  // Priority: Selected > Hot > Internet (Orange) > Intranet (Blue)
+  // Priority: Selected > Internet (Orange) > Intranet (Blue)
   let baseColor = "#0088ff"; // Default Blue (Intranet)
 
   if (!isPrivateIP(ip)) {
     baseColor = "#ff8800"; // Orange (Internet)
   }
 
-  if (isHot) baseColor = "#ff0000"; // Red (High Traffic)
+  // NOTE: Red coloring on high traffic removed as per user request
+  // if (isHot) baseColor = "#ff0000"; // Red (High Traffic)
   if (isSelected) baseColor = "#ffcc00"; // Gold (Selected)
 
   const glowColor = isSelected ? "#ffee00" : baseColor;
@@ -300,7 +301,7 @@ function Peer({ ip, position, isHot, isSelected, onClick, onDragStart, onDragEnd
 
 const DECAY_RATE = 2.0;
 
-function ConnectionLink({ linkData }) {
+function ConnectionLink({ linkData, maxThreshold = 10000 }) {
   const ref = useRef();
   // Fixed thinness (Reduced)
   const THICKNESS = 0.05;
@@ -327,7 +328,7 @@ function ConnectionLink({ linkData }) {
       ref.current.setRotationFromQuaternion(quaternion);
 
       // COLOR / INTENSITY Change logic
-      const ratio = Math.min(1.0, linkData.volume / 10000);
+      const ratio = Math.min(1.0, linkData.volume / maxThreshold);
 
       // Color Interpolation
       const color = new THREE.Color().lerpColors(
@@ -463,11 +464,14 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled
 
       <div><strong>IP:</strong> {targetIp}</div>
       {/* For Agent, maybe we don't have volume/protocols logic wired up effectively yet in visualizer state for 'agentsRef' */}
+      {!isAgent && peerData && (
+        <div><strong>First Seen:</strong> {peerData.firstSeen ? new Date(peerData.firstSeen).toLocaleTimeString() : 'N/A'}</div>
+      )}
       <div><strong>Last Seen:</strong> {new Date((peerData || agentData)?.lastSeen).toLocaleTimeString()}</div>
 
       {!isAgent && (
         <>
-          <div><strong>Speed:</strong> {((peerData?.volume || 0) * 2 / 1024).toFixed(2)} KB/s</div>
+          <div><strong>Speed:</strong> {peerData?.currentSpeed ? (peerData.currentSpeed / 1024).toFixed(2) : '0.00'} KB/s</div>
           <div><strong>Protocols:</strong> {peerData?.protocols ? Array.from(peerData.protocols).join(', ') : 'N/A'}</div>
           <div><strong>Ports:</strong> {renderPorts(peerData)}</div>
         </>
@@ -511,7 +515,7 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled
       {error && <div style={{ color: 'red' }}>{error}</div>}
 
       {/* Attribution */}
-      {attribution && attribution.text && (
+      {attribution && attribution.text && !isAgent && !isPrivateIP(targetIp) && (
         <div style={{ marginTop: '15px', fontSize: '0.8em', textAlign: 'center', opacity: 0.8 }}>
           {attribution.url ? (
             <a href={attribution.url} target="_blank" rel="noopener noreferrer" style={{ color: '#00ffcc', textDecoration: 'none' }}>
@@ -538,6 +542,7 @@ export default function TrafficVisualizer() {
   const agentsRef = useRef({}); // Store agents data
   const linksRef = useRef({});
   const timeoutRef = useRef(30000); // Default 30s, updated by config
+  const trafficMaxThresholdRef = useRef(10000); // Default
   // const ws = useRef(null); // No longer needed
 
   // State
@@ -574,6 +579,10 @@ export default function TrafficVisualizer() {
         if (config.peerTimeout) {
           timeoutRef.current = config.peerTimeout;
         }
+        if (config.trafficMaxThreshold) {
+          trafficMaxThresholdRef.current = config.trafficMaxThreshold;
+        }
+
         setGeoipEnabled(config.geoipEnabled || false);
         setAttribution({ text: config.geoipAttributionText, url: config.geoipAttributionUrl });
         const serverUrl = `${protocol}//${host}:${port}`;
@@ -644,7 +653,10 @@ export default function TrafficVisualizer() {
                     currentPeers[ip] = {
                       position: new THREE.Vector3(Math.cos(angle) * PEER_RADIUS, Math.random() * 5 - 2, Math.sin(angle) * PEER_RADIUS),
                       lastSeen: timestamp,
-                      volume: 0,
+                      firstSeen: timestamp,
+                      volume: 0, // This is decayed volume for visualization size/heat
+                      speedHistory: [], // { t: number, s: number } for exact speed calc
+                      currentSpeed: 0,
                       protocols: new Set(),
                       portsIn: new Set(),
                       portsOut: new Set()
@@ -655,6 +667,10 @@ export default function TrafficVisualizer() {
                   }
                   if (currentPeers[ip]) {
                     currentPeers[ip].volume += data.size;
+
+                    // Add to speed history
+                    currentPeers[ip].speedHistory.push({ t: timestamp, s: data.size });
+
                     if (data.proto) currentPeers[ip].protocols.add(protocolToJSON(data.proto));
                     if (role === 'src') {
                       if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsOut.add(data.dstPort);
@@ -758,13 +774,30 @@ export default function TrafficVisualizer() {
       let newEffects = [];
 
       Object.keys(currentPeers).forEach(key => {
-        currentPeers[key].volume *= 0.8;
+        const peer = currentPeers[key];
+        peer.volume *= 0.8;
+
+        // Speed Calculation (Last 1000ms)
+        if (peer.speedHistory) {
+          // Prune old history
+          const cutoff = now - 1000;
+          let startIndex = 0;
+          while (startIndex < peer.speedHistory.length && peer.speedHistory[startIndex].t < cutoff) {
+            startIndex++;
+          }
+          if (startIndex > 0) {
+            peer.speedHistory.splice(0, startIndex);
+          }
+
+          // Calculate sum
+          peer.currentSpeed = peer.speedHistory.reduce((acc, item) => acc + item.s, 0);
+        }
 
         // Skip timeout for selected peer
         const isSelected = (key === selectedPeer);
 
-        if (!isSelected && now - currentPeers[key].lastSeen > timeoutRef.current) {
-          newEffects.push({ id: key + '-' + now, position: currentPeers[key].position });
+        if (!isSelected && now - peer.lastSeen > timeoutRef.current) {
+          newEffects.push({ id: key + '-' + now, position: peer.position });
           delete currentPeers[key];
           peersChanged = true;
 
@@ -784,9 +817,14 @@ export default function TrafficVisualizer() {
         const isTop = top3.has(key) && currentPeers[key].volume > 100;
         if (currentPeers[key].isHot !== isTop) {
           currentPeers[key].isHot = isTop;
-          peersChanged = true;
+          peersChanged = true; // Still need to trigger re-render even if color doesn't change based on it (logic might change back or be used elsewhere)
         }
       });
+
+      // Always update state if selected peer is active (to show realtime speed)
+      if (selectedPeer && currentPeers[selectedPeer]) {
+        peersChanged = true;
+      }
 
       if (peersChanged) {
         setPeersState({ ...currentPeers });
@@ -912,7 +950,7 @@ export default function TrafficVisualizer() {
         ))}
 
         {Object.entries(linksState).map(([id, linkData]) => (
-          <ConnectionLink key={id} linkData={linkData} />
+          <ConnectionLink key={id} linkData={linkData} maxThreshold={trafficMaxThresholdRef.current} />
         ))}
 
       </Canvas>
