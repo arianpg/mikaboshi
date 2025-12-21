@@ -105,8 +105,13 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
     println!("Connected to server");
 
     // Create a channel for streaming packets
-    let (tx, rx) = mpsc::channel(100);
-    let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let (tx, rx) = mpsc::channel(1024); // Increased buffer size
+
+    // create a stream of batches
+    use tokio_stream::StreamExt;
+    let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx)
+        .chunks_timeout(100, Duration::from_millis(100))
+        .map(|packets| compress_packets(packets));
 
     // Spawn the gRPC client stream handler
     let mut client_clone = client.clone();
@@ -142,6 +147,35 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
 
     // If we are here, it means connection lost or done
     Err("Connection lost".into())
+}
+
+fn compress_packets(packets: Vec<Packet>) -> packet::PacketBatch {
+    use std::collections::HashMap;
+
+    // Key: (src_ip, dst_ip, src_is_agent, dst_is_agent, proto, src_port, dst_port)
+    type PacketKey = (Vec<u8>, Vec<u8>, bool, bool, i32, i32, i32);
+    
+    let mut map: HashMap<PacketKey, Packet> = HashMap::new();
+
+    for p in packets {
+        let key = (
+            p.src_ip.clone(), 
+            p.dst_ip.clone(), 
+            p.src_is_agent, 
+            p.dst_is_agent, 
+            p.proto, 
+            p.src_port, 
+            p.dst_port
+        );
+
+        map.entry(key)
+           .and_modify(|existing| existing.size += p.size)
+           .or_insert(p);
+    }
+
+    packet::PacketBatch {
+        packets: map.into_values().collect()
+    }
 }
 
 fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -202,31 +236,38 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> R
 
                 // Try parsing
                 if let Ok(headers) = headers_result {
-                    let mut src_ip = String::new();
-                    let mut dst_ip = String::new();
-                    let mut proto = String::new();
+                    let mut src_ip_bytes: Vec<u8> = Vec::new();
+                    let mut dst_ip_bytes: Vec<u8> = Vec::new();
+
+                    let mut src_ip_str = String::new(); // for local checking
+                    let mut dst_ip_str = String::new(); // for local checking
                     
                     if let Some(ip) = headers.ip {
                         match ip {
                             IpHeader::Version4(ipv4, _) => {
-                                src_ip = ipv4.source.iter().map(|b| b.to_string()).collect::<Vec<String>>().join(".");
-                                dst_ip = ipv4.destination.iter().map(|b| b.to_string()).collect::<Vec<String>>().join(".");
+                                src_ip_bytes = ipv4.source.to_vec();
+                                dst_ip_bytes = ipv4.destination.to_vec();
+                                src_ip_str = ipv4.source.iter().map(|b| b.to_string()).collect::<Vec<String>>().join(".");
+                                dst_ip_str = ipv4.destination.iter().map(|b| b.to_string()).collect::<Vec<String>>().join(".");
                             },
                             IpHeader::Version6(ipv6, _) => {
                                 if !args.ipv6 {
                                     continue;
                                 }
+                                src_ip_bytes = ipv6.source.to_vec();
+                                dst_ip_bytes = ipv6.destination.to_vec();
+                                
                                 use std::net::Ipv6Addr;
                                 let s = Ipv6Addr::from(ipv6.source);
                                 let d = Ipv6Addr::from(ipv6.destination);
-                                src_ip = s.to_string();
-                                dst_ip = d.to_string();
+                                src_ip_str = s.to_string();
+                                dst_ip_str = d.to_string();
                             } 
                         }
                         
                         // Check if agent
-                         let src_is_agent = local_ips.contains(&src_ip);
-                         let dst_is_agent = local_ips.contains(&dst_ip);
+                         let src_is_agent = local_ips.contains(&src_ip_str);
+                         let dst_is_agent = local_ips.contains(&dst_ip_str);
 
                          if !src_is_agent && !dst_is_agent {
                              continue;
@@ -234,31 +275,33 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> R
 
                         let mut src_port = 0;
                         let mut dst_port = 0;
+                        let mut proto = packet::Protocol::Unknown;
                         
                         if let Some(transport) = headers.transport {
                             match transport {
                                 TransportHeader::Tcp(tcp) => {
                                     src_port = tcp.source_port as i32;
                                     dst_port = tcp.destination_port as i32;
-                                    proto = "TCP".to_string();
+                                    proto = packet::Protocol::Tcp;
                                 },
                                 TransportHeader::Udp(udp) => {
                                     src_port = udp.source_port as i32;
                                     dst_port = udp.destination_port as i32;
-                                    proto = "UDP".to_string();
+                                    proto = packet::Protocol::Udp;
                                 },
-                                _ => {}
+                                _ => {
+                                    proto = packet::Protocol::Other;
+                                }
                             }
                         }
 
                         let info = Packet {
-                            r#type: "traffic".to_string(),
-                            src_ip,
-                            dst_ip,
+                            src_ip: src_ip_bytes,
+                            dst_ip: dst_ip_bytes,
                             src_is_agent,
                             dst_is_agent,
                             size: packet.header.len as i32,
-                            proto,
+                            proto: proto.into(),
                             src_port,
                             dst_port,
                         };
@@ -280,7 +323,15 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> R
 }
 
 async fn generate_mock_traffic(tx: mpsc::Sender<Packet>) {
-    let peers = vec!["192.168.1.10", "192.168.1.20", "10.0.0.5", "172.16.0.3"];
+    // 192.168.1.10, .20, 10.0.0.5, 172.16.0.3
+    let peers = vec![
+        vec![192, 168, 1, 10], 
+        vec![192, 168, 1, 20], 
+        vec![10, 0, 0, 5], 
+        vec![172, 16, 0, 3]
+    ];
+    let localhost = vec![127, 0, 0, 1];
+
     let mut rng = rand::thread_rng();
     use rand::Rng;
 
@@ -290,27 +341,28 @@ async fn generate_mock_traffic(tx: mpsc::Sender<Packet>) {
 
         if tx.is_closed() { return; }
 
-        let peer = peers[rng.gen_range(0..peers.len())];
+        let peer = peers[rng.gen_range(0..peers.len())].clone();
         let (src, dst) = if rng.gen_bool(0.5) {
-            ("127.0.0.1".to_string(), peer.to_string())
+            (localhost.clone(), peer)
         } else {
-            (peer.to_string(), "127.0.0.1".to_string())
+            (peer, localhost.clone())
         };
 
+        let mut src_is_agent = false;
+        let mut dst_is_agent = false;
+        if src == localhost { src_is_agent = true; }
+        if dst == localhost { dst_is_agent = true; }
+
         let info = Packet {
-            r#type: "traffic".to_string(),
             src_ip: src,
             dst_ip: dst,
-            src_is_agent: false,
-            dst_is_agent: false,
+            src_is_agent,
+            dst_is_agent,
             size: rng.gen_range(64..1000),
-            proto: "TCP".to_string(),
+            proto: packet::Protocol::Tcp.into(),
             src_port: 0,
             dst_port: 0,
         };
-        let mut info = info;
-        if info.src_ip == "127.0.0.1" { info.src_is_agent = true; }
-        if info.dst_ip == "127.0.0.1" { info.dst_is_agent = true; }
 
         if tx.send(info).await.is_err() {
             return;

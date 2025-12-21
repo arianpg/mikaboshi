@@ -13,32 +13,32 @@ pub mod packet {
 }
 
 use packet::agent_service_server::{AgentService, AgentServiceServer};
-use packet::{Empty, Packet};
+use packet::{Empty, Packet, PacketBatch};
 
 // Shared state
 struct AppState {
-    tx: broadcast::Sender<Packet>,
+    tx: broadcast::Sender<PacketBatch>,
 }
 
 #[derive(Default)]
 struct GrpcService {
-    tx: Option<broadcast::Sender<Packet>>,
+    tx: Option<broadcast::Sender<PacketBatch>>,
 }
 
 #[tonic::async_trait]
 impl AgentService for GrpcService {
     async fn stream_packets(
         &self,
-        request: Request<tonic::Streaming<Packet>>,
+        request: Request<tonic::Streaming<PacketBatch>>,
     ) -> Result<Response<Empty>, Status> {
         let mut stream = request.into_inner();
         let tx = self.tx.clone().ok_or(Status::internal("Internal error"))?;
 
         while let Some(result) = stream.next().await {
             match result {
-                Ok(packet) => {
-                     // Broadcast packet to all subscribers (gRPC-Web clients)
-                     let _ = tx.send(packet);
+                Ok(batch) => {
+                     // Broadcast packet batch to all subscribers
+                     let _ = tx.send(batch);
                 }
                 Err(e) => return Err(e),
             }
@@ -47,7 +47,7 @@ impl AgentService for GrpcService {
         Ok(Response::new(Empty {}))
     }
 
-    type SubscribeStream = tokio_stream::wrappers::ReceiverStream<Result<Packet, Status>>;
+    type SubscribeStream = tokio_stream::wrappers::ReceiverStream<Result<PacketBatch, Status>>;
 
     async fn subscribe(
         &self,
@@ -60,8 +60,8 @@ impl AgentService for GrpcService {
         let (client_tx, client_rx) = tokio::sync::mpsc::channel(100);
 
         tokio::spawn(async move {
-            while let Ok(packet) = rx.recv().await {
-                if client_tx.send(Ok(packet)).await.is_err() {
+            while let Ok(batch) = rx.recv().await {
+                if client_tx.send(Ok(batch)).await.is_err() {
                     break;
                 }
             }

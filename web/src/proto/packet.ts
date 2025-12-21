@@ -13,17 +13,71 @@ import { share } from "rxjs/operators";
 
 export const protobufPackage = "packet";
 
+export enum Protocol {
+  UNKNOWN = 0,
+  TCP = 1,
+  UDP = 2,
+  ICMP = 3,
+  OTHER = 4,
+  UNRECOGNIZED = -1,
+}
+
+export function protocolFromJSON(object: any): Protocol {
+  switch (object) {
+    case 0:
+    case "UNKNOWN":
+      return Protocol.UNKNOWN;
+    case 1:
+    case "TCP":
+      return Protocol.TCP;
+    case 2:
+    case "UDP":
+      return Protocol.UDP;
+    case 3:
+    case "ICMP":
+      return Protocol.ICMP;
+    case 4:
+    case "OTHER":
+      return Protocol.OTHER;
+    case -1:
+    case "UNRECOGNIZED":
+    default:
+      return Protocol.UNRECOGNIZED;
+  }
+}
+
+export function protocolToJSON(object: Protocol): string {
+  switch (object) {
+    case Protocol.UNKNOWN:
+      return "UNKNOWN";
+    case Protocol.TCP:
+      return "TCP";
+    case Protocol.UDP:
+      return "UDP";
+    case Protocol.ICMP:
+      return "ICMP";
+    case Protocol.OTHER:
+      return "OTHER";
+    case Protocol.UNRECOGNIZED:
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 export interface Empty {
 }
 
+export interface PacketBatch {
+  packets: Packet[];
+}
+
 export interface Packet {
-  type: string;
-  srcIp: string;
-  dstIp: string;
+  srcIp: Uint8Array;
+  dstIp: Uint8Array;
   srcIsAgent: boolean;
   dstIsAgent: boolean;
   size: number;
-  proto: string;
+  proto: Protocol;
   srcPort: number;
   dstPort: number;
 }
@@ -71,15 +125,74 @@ export const Empty: MessageFns<Empty> = {
   },
 };
 
+function createBasePacketBatch(): PacketBatch {
+  return { packets: [] };
+}
+
+export const PacketBatch: MessageFns<PacketBatch> = {
+  encode(message: PacketBatch, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    for (const v of message.packets) {
+      Packet.encode(v!, writer.uint32(10).fork()).join();
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): PacketBatch {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBasePacketBatch();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.packets.push(Packet.decode(reader, reader.uint32()));
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): PacketBatch {
+    return {
+      packets: globalThis.Array.isArray(object?.packets) ? object.packets.map((e: any) => Packet.fromJSON(e)) : [],
+    };
+  },
+
+  toJSON(message: PacketBatch): unknown {
+    const obj: any = {};
+    if (message.packets?.length) {
+      obj.packets = message.packets.map((e) => Packet.toJSON(e));
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<PacketBatch>, I>>(base?: I): PacketBatch {
+    return PacketBatch.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<PacketBatch>, I>>(object: I): PacketBatch {
+    const message = createBasePacketBatch();
+    message.packets = object.packets?.map((e) => Packet.fromPartial(e)) || [];
+    return message;
+  },
+};
+
 function createBasePacket(): Packet {
   return {
-    type: "",
-    srcIp: "",
-    dstIp: "",
+    srcIp: new Uint8Array(0),
+    dstIp: new Uint8Array(0),
     srcIsAgent: false,
     dstIsAgent: false,
     size: 0,
-    proto: "",
+    proto: 0,
     srcPort: 0,
     dstPort: 0,
   };
@@ -87,32 +200,29 @@ function createBasePacket(): Packet {
 
 export const Packet: MessageFns<Packet> = {
   encode(message: Packet, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.type !== "") {
-      writer.uint32(10).string(message.type);
+    if (message.srcIp.length !== 0) {
+      writer.uint32(10).bytes(message.srcIp);
     }
-    if (message.srcIp !== "") {
-      writer.uint32(18).string(message.srcIp);
-    }
-    if (message.dstIp !== "") {
-      writer.uint32(26).string(message.dstIp);
+    if (message.dstIp.length !== 0) {
+      writer.uint32(18).bytes(message.dstIp);
     }
     if (message.srcIsAgent !== false) {
-      writer.uint32(32).bool(message.srcIsAgent);
+      writer.uint32(24).bool(message.srcIsAgent);
     }
     if (message.dstIsAgent !== false) {
-      writer.uint32(40).bool(message.dstIsAgent);
+      writer.uint32(32).bool(message.dstIsAgent);
     }
     if (message.size !== 0) {
-      writer.uint32(48).int32(message.size);
+      writer.uint32(40).int32(message.size);
     }
-    if (message.proto !== "") {
-      writer.uint32(58).string(message.proto);
+    if (message.proto !== 0) {
+      writer.uint32(48).int32(message.proto);
     }
     if (message.srcPort !== 0) {
-      writer.uint32(64).int32(message.srcPort);
+      writer.uint32(56).int32(message.srcPort);
     }
     if (message.dstPort !== 0) {
-      writer.uint32(72).int32(message.dstPort);
+      writer.uint32(64).int32(message.dstPort);
     }
     return writer;
   },
@@ -129,7 +239,7 @@ export const Packet: MessageFns<Packet> = {
             break;
           }
 
-          message.type = reader.string();
+          message.srcIp = reader.bytes();
           continue;
         }
         case 2: {
@@ -137,15 +247,15 @@ export const Packet: MessageFns<Packet> = {
             break;
           }
 
-          message.srcIp = reader.string();
+          message.dstIp = reader.bytes();
           continue;
         }
         case 3: {
-          if (tag !== 26) {
+          if (tag !== 24) {
             break;
           }
 
-          message.dstIp = reader.string();
+          message.srcIsAgent = reader.bool();
           continue;
         }
         case 4: {
@@ -153,7 +263,7 @@ export const Packet: MessageFns<Packet> = {
             break;
           }
 
-          message.srcIsAgent = reader.bool();
+          message.dstIsAgent = reader.bool();
           continue;
         }
         case 5: {
@@ -161,7 +271,7 @@ export const Packet: MessageFns<Packet> = {
             break;
           }
 
-          message.dstIsAgent = reader.bool();
+          message.size = reader.int32();
           continue;
         }
         case 6: {
@@ -169,27 +279,19 @@ export const Packet: MessageFns<Packet> = {
             break;
           }
 
-          message.size = reader.int32();
+          message.proto = reader.int32() as any;
           continue;
         }
         case 7: {
-          if (tag !== 58) {
-            break;
-          }
-
-          message.proto = reader.string();
-          continue;
-        }
-        case 8: {
-          if (tag !== 64) {
+          if (tag !== 56) {
             break;
           }
 
           message.srcPort = reader.int32();
           continue;
         }
-        case 9: {
-          if (tag !== 72) {
+        case 8: {
+          if (tag !== 64) {
             break;
           }
 
@@ -207,13 +309,12 @@ export const Packet: MessageFns<Packet> = {
 
   fromJSON(object: any): Packet {
     return {
-      type: isSet(object.type) ? globalThis.String(object.type) : "",
-      srcIp: isSet(object.srcIp) ? globalThis.String(object.srcIp) : "",
-      dstIp: isSet(object.dstIp) ? globalThis.String(object.dstIp) : "",
+      srcIp: isSet(object.srcIp) ? bytesFromBase64(object.srcIp) : new Uint8Array(0),
+      dstIp: isSet(object.dstIp) ? bytesFromBase64(object.dstIp) : new Uint8Array(0),
       srcIsAgent: isSet(object.srcIsAgent) ? globalThis.Boolean(object.srcIsAgent) : false,
       dstIsAgent: isSet(object.dstIsAgent) ? globalThis.Boolean(object.dstIsAgent) : false,
       size: isSet(object.size) ? globalThis.Number(object.size) : 0,
-      proto: isSet(object.proto) ? globalThis.String(object.proto) : "",
+      proto: isSet(object.proto) ? protocolFromJSON(object.proto) : 0,
       srcPort: isSet(object.srcPort) ? globalThis.Number(object.srcPort) : 0,
       dstPort: isSet(object.dstPort) ? globalThis.Number(object.dstPort) : 0,
     };
@@ -221,14 +322,11 @@ export const Packet: MessageFns<Packet> = {
 
   toJSON(message: Packet): unknown {
     const obj: any = {};
-    if (message.type !== "") {
-      obj.type = message.type;
+    if (message.srcIp.length !== 0) {
+      obj.srcIp = base64FromBytes(message.srcIp);
     }
-    if (message.srcIp !== "") {
-      obj.srcIp = message.srcIp;
-    }
-    if (message.dstIp !== "") {
-      obj.dstIp = message.dstIp;
+    if (message.dstIp.length !== 0) {
+      obj.dstIp = base64FromBytes(message.dstIp);
     }
     if (message.srcIsAgent !== false) {
       obj.srcIsAgent = message.srcIsAgent;
@@ -239,8 +337,8 @@ export const Packet: MessageFns<Packet> = {
     if (message.size !== 0) {
       obj.size = Math.round(message.size);
     }
-    if (message.proto !== "") {
-      obj.proto = message.proto;
+    if (message.proto !== 0) {
+      obj.proto = protocolToJSON(message.proto);
     }
     if (message.srcPort !== 0) {
       obj.srcPort = Math.round(message.srcPort);
@@ -256,13 +354,12 @@ export const Packet: MessageFns<Packet> = {
   },
   fromPartial<I extends Exact<DeepPartial<Packet>, I>>(object: I): Packet {
     const message = createBasePacket();
-    message.type = object.type ?? "";
-    message.srcIp = object.srcIp ?? "";
-    message.dstIp = object.dstIp ?? "";
+    message.srcIp = object.srcIp ?? new Uint8Array(0);
+    message.dstIp = object.dstIp ?? new Uint8Array(0);
     message.srcIsAgent = object.srcIsAgent ?? false;
     message.dstIsAgent = object.dstIsAgent ?? false;
     message.size = object.size ?? 0;
-    message.proto = object.proto ?? "";
+    message.proto = object.proto ?? 0;
     message.srcPort = object.srcPort ?? 0;
     message.dstPort = object.dstPort ?? 0;
     return message;
@@ -270,8 +367,8 @@ export const Packet: MessageFns<Packet> = {
 };
 
 export interface AgentService {
-  StreamPackets(request: Observable<DeepPartial<Packet>>, metadata?: grpc.Metadata): Promise<Empty>;
-  Subscribe(request: DeepPartial<Empty>, metadata?: grpc.Metadata): Observable<Packet>;
+  StreamPackets(request: Observable<DeepPartial<PacketBatch>>, metadata?: grpc.Metadata): Promise<Empty>;
+  Subscribe(request: DeepPartial<Empty>, metadata?: grpc.Metadata): Observable<PacketBatch>;
 }
 
 export class AgentServiceClientImpl implements AgentService {
@@ -283,11 +380,11 @@ export class AgentServiceClientImpl implements AgentService {
     this.Subscribe = this.Subscribe.bind(this);
   }
 
-  StreamPackets(request: Observable<DeepPartial<Packet>>, metadata?: grpc.Metadata): Promise<Empty> {
+  StreamPackets(request: Observable<DeepPartial<PacketBatch>>, metadata?: grpc.Metadata): Promise<Empty> {
     throw new Error("ts-proto does not yet support client streaming!");
   }
 
-  Subscribe(request: DeepPartial<Empty>, metadata?: grpc.Metadata): Observable<Packet> {
+  Subscribe(request: DeepPartial<Empty>, metadata?: grpc.Metadata): Observable<PacketBatch> {
     return this.rpc.invoke(AgentServiceSubscribeDesc, Empty.fromPartial(request), metadata);
   }
 }
@@ -306,7 +403,7 @@ export const AgentServiceSubscribeDesc: UnaryMethodDefinitionish = {
   } as any,
   responseType: {
     deserializeBinary(data: Uint8Array) {
-      const value = Packet.decode(data);
+      const value = PacketBatch.decode(data);
       return {
         ...value,
         toObject() {
@@ -428,6 +525,23 @@ export class GrpcWebImpl {
       upStream();
     }).pipe(share());
   }
+}
+
+function bytesFromBase64(b64: string): Uint8Array {
+  const bin = globalThis.atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; ++i) {
+    arr[i] = bin.charCodeAt(i);
+  }
+  return arr;
+}
+
+function base64FromBytes(arr: Uint8Array): string {
+  const bin: string[] = [];
+  arr.forEach((byte) => {
+    bin.push(globalThis.String.fromCharCode(byte));
+  });
+  return globalThis.btoa(bin.join(""));
 }
 
 type Builtin = Date | Function | Uint8Array | string | number | boolean | undefined;
