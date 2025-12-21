@@ -51,15 +51,15 @@ sudo ./mikaboshi-agent --server localhost:50051 --device eth0
 
 **オプション:**
 
-| 引数オプション | Docker環境変数 | 説明 | デフォルト値 |
-| --- | --- | --- | --- |
-| `--server <string>` | `SERVER` | 接続先サーバーのアドレス | "localhost:50051" |
-| `--device <string>` | `DEVICE` | キャプチャ対象のデバイス名 | "any" |
-| `--snapshot <u32>` | `SNAPSHOT` | パケットキャプチャするデータの最大長 | 1024 |
-| `--promiscuous` | `PROMISCUOUS` | プロミスキャスモードを有効にします | false |
-| `--ipv6` | `IPV6` | IPv6トラフィックもキャプチャ対象にします (デフォルトはIPv4のみ) | false |
-| `--mock` | `MOCK` | 実際のトラフィックの代わりにモックデータを生成して送信します | false |
-| `--list_devices` | `LIST_DEVICES` | 利用可能なデバイス一覧を表示して終了します<br/>Windows環境でのネットワークインターフェース確認用 | false |
+| 引数オプション | 説明 | デフォルト値 |
+| --- | --- | --- |
+| `--server <string>` | 接続先サーバーのアドレス | "localhost:50051" |
+| `--device <string>` | キャプチャ対象のデバイス名 | "any" |
+| `--snapshot <u32>` | パケットキャプチャするデータの最大長 | 1024 |
+| `--promiscuous` | プロミスキャスモードを有効にします | false |
+| `--ipv6` | IPv6トラフィックもキャプチャ対象にします (デフォルトはIPv4のみ) | false |
+| `--mock` | 実際のトラフィックの代わりにモックデータを生成して送信します | false |
+| `--list_devices` |利用可能なデバイス一覧を表示して終了します<br/>Windows環境でのネットワークインターフェース確認用 | false |
 
 ### 3. ブラウザでアクセス
 
