@@ -6,6 +6,7 @@ use tokio::sync::broadcast;
 use tonic::{transport::Server, Request, Response, Status};
 use tower_http::services::ServeDir;
 use tower_http::cors::{CorsLayer, Any};
+use base64;
 
 pub mod packet {
     tonic::include_proto!("packet");
@@ -95,6 +96,14 @@ struct Args {
     /// Path to the GeoIP MMDB file (optional)
     #[arg(long, env = "GEOIP_PATH")]
     geoip_path: Option<String>,
+
+    /// Basic Auth Username
+    #[arg(long, env = "BASIC_AUTH_USER")]
+    basic_auth_user: Option<String>,
+
+    /// Basic Auth Password
+    #[arg(long, env = "BASIC_AUTH_PASSWORD")]
+    basic_auth_password: Option<String>,
 }
 
 #[tokio::main]
@@ -185,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- HTTP Server (Static Files) ---
     // Serve static files from web/dist
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/config", axum::routing::get(move || async move {
             axum::Json(serde_json::json!({
                 "grpcPort": config_args_monitor.grpc_port,
@@ -226,6 +235,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              }
         }))
         .nest_service("/", ServeDir::new("web/dist"));
+
+    // Enable Basic Auth if configured
+    if let (Some(user), Some(pass)) = (config_args.basic_auth_user.clone(), config_args.basic_auth_password.clone()) {
+        println!("Basic Authentication enabled for user: {}", user);
+        let auth_string = format!("{}:{}", user, pass);
+        let encoded_auth = base64::encode(auth_string);
+        let expected_header_value = format!("Basic {}", encoded_auth);
+        
+        app = app.layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let expected_header_value = expected_header_value.clone();
+            async move {
+                use axum::{http::{HeaderValue, StatusCode}, response::IntoResponse};
+                
+                let auth_header = req.headers().get("Authorization");
+                match auth_header {
+                    Some(header) if header == expected_header_value.as_str() => {
+                         Ok(next.run(req).await)
+                    }
+                    _ => {
+                        let mut response = StatusCode::UNAUTHORIZED.into_response();
+                        response.headers_mut().insert(
+                            "WWW-Authenticate", 
+                            HeaderValue::from_static("Basic realm=\"Restricted\"")
+                        );
+                        Err(response)
+                    }
+                }
+            }
+        }));
+    } else {
+        println!("Basic Authentication disabled (credentials not set).");
+    }
 
     let http_addr = SocketAddr::from(([0, 0, 0, 0], config_args.http_port));
     println!("HTTP server listening on {}", http_addr);

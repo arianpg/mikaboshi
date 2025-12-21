@@ -39,6 +39,8 @@ docker run -d --name mikaboshi-server -p 8080:8080 -p 50051:50051 arianpg/mikabo
 | `--peer-timeout <u64>` | `PEER_TIMEOUT` | 通信がないPeerを切断とみなすまでの秒数 | 30 |
 | `--channel-capacity <u64>` | `CHANNEL_CAPACITY` | トラフィックチャネルの容量 | 4096 |
 | `--geoip-path <string>` | `GEOIP_PATH` | ローカルMMDBファイルのパス。設定されている場合、ipapiの代わりに使用されます。 | なし |
+| `--basic-auth-user <string>` | `BASIC_AUTH_USER` | Basic Authのユーザー名 | なし |
+| `--basic-auth-password <string>` | `BASIC_AUTH_PASSWORD` | Basic Authのパスワード | なし |
 
 ### 2. Mikaboshi-Agent
 
