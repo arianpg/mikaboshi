@@ -91,6 +91,10 @@ struct Args {
     /// Timeout for peer inactivity (seconds)
     #[arg(long, env = "PEER_TIMEOUT", default_value_t = 30)]
     peer_timeout: u64,
+
+    /// Path to the GeoIP MMDB file (optional)
+    #[arg(long, env = "GEOIP_PATH")]
+    geoip_path: Option<String>,
 }
 
 #[tokio::main]
@@ -127,18 +131,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap();
     });
 
+    // --- GeoIP Setup ---
+    let geoip_reader = if let Some(path) = &args.geoip_path {
+        println!("Loading GeoIP database from: {}", path);
+        match maxminddb::Reader::open_readfile(path) {
+            Ok(reader) => {
+                println!("GeoIP database loaded successfully.");
+                Some(std::sync::Arc::new(reader))
+            },
+            Err(e) => {
+                eprintln!("Failed to load GeoIP database: {}. Continuing without local GeoIP.", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let geoip_state = geoip_reader.clone();
+    let config_args = std::sync::Arc::new(args);
+    let config_args_monitor = config_args.clone();
+
     // --- HTTP Server (Static Files) ---
     // Serve static files from web/dist
     let app = Router::new()
         .route("/config", axum::routing::get(move || async move {
             axum::Json(serde_json::json!({
-                "grpcPort": args.grpc_port,
-                "peerTimeout": args.peer_timeout * 1000 // Convert to ms
+                "grpcPort": config_args_monitor.grpc_port,
+                "peerTimeout": config_args_monitor.peer_timeout * 1000, // Convert to ms
+                "geoipEnabled": geoip_state.is_some()
             }))
+        }))
+        .route("/geoip/:ip", axum::routing::get(move |axum::extract::Path(ip): axum::extract::Path<String>| {
+             let reader = geoip_reader.clone();
+             async move {
+                 if let Some(reader) = reader {
+                     let ip_addr: std::net::IpAddr = match ip.parse() {
+                         Ok(addr) => addr,
+                         Err(_) => return axum::response::Json(serde_json::json!({ "error": "Invalid IP" })),
+                     };
+
+                     // Use maxminddb::geoip2::City for standard City DB
+                     match reader.lookup::<maxminddb::geoip2::City>(ip_addr) {
+                         Ok(city) => {
+                             let country_name = city.country.and_then(|c| c.names).and_then(|n| n.get("en").map(|s| s.to_string()));
+                             let city_name = city.city.and_then(|c| c.names).and_then(|n| n.get("en").map(|s| s.to_string()));
+                             
+                             axum::response::Json(serde_json::json!({
+                                 "ip": ip,
+                                 "country_name": country_name,
+                                 "city": city_name,
+                                 "org": null, // Not available in City DB
+                                 "asn": null  // Not available in City DB
+                             }))
+                         },
+                         Err(_) => axum::response::Json(serde_json::json!({ "error": "IP not found" }))
+                     }
+                 } else {
+                     axum::response::Json(serde_json::json!({ "error": "GeoIP not configured" }))
+                 }
+             }
         }))
         .nest_service("/", ServeDir::new("web/dist"));
 
-    let http_addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
+    let http_addr = SocketAddr::from(([0, 0, 0, 0], config_args.http_port));
     println!("HTTP server listening on {}", http_addr);
     
     let listener = tokio::net::TcpListener::bind(http_addr).await.unwrap();

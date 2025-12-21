@@ -26,10 +26,8 @@ Rust製の高性能なエージェントとサーバー、そしてReact + Three
 ./mikaboshi-server
 
 # Docker起動
+# Docker Compose利用の場合は、compose.ymlを参考にしてください
 docker run -d --name mikaboshi-server -p 8080:8080 -p 50051:50051 arianpg/mikaboshi-server:latest
-
-# Docker Compose起動
-docker compose up -d
 ```
 
 **オプション:**
@@ -40,6 +38,7 @@ docker compose up -d
 | `--grpc-port <u16>` | `GRPC_PORT` | gRPCサーバーのポート | 50051 |
 | `--peer-timeout <u64>` | `PEER_TIMEOUT` | 通信がないPeerを切断とみなすまでの秒数 | 30 |
 | `--channel-capacity <u64>` | `CHANNEL_CAPACITY` | トラフィックチャネルの容量 | 4096 |
+| `--geoip-path <string>` | `GEOIP_PATH` | ローカルMMDBファイルのパス。設定されている場合、ipapiの代わりに使用されます。 | なし |
 
 ### 2. Mikaboshi-Agent
 
@@ -69,7 +68,8 @@ sudo ./mikaboshi-agent --server localhost:50051 --device eth0
 
 - **リアルタイム可視化**: エージェント(球体)と通信相手(ディスク)のトラフィックを光るラインで表示します。
 - **データ量表現**: トラフィックのサイズに応じてラインの色が変化します。
-- **詳細情報**: PeerのIPアドレスや国情報(ipapi利用)を表示します。
+- **詳細情報**: PeerのIPアドレスや国情報を表示します。
+    - デフォルトでは[ipapi](https://ipapi.co)を使用しますが、ローカルのMMDBファイル(要別途入手)を使用することも可能です。
 
 ## ビルド
 

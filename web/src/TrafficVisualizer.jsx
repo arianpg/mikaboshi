@@ -360,7 +360,7 @@ function DespawnEffect({ position, onComplete }) {
 
 // --- Info Panel Component ---
 // --- Info Panel Component ---
-function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose }) {
+function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled }) {
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -368,17 +368,22 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose }) {
   const targetIp = peerIp || agentIp;
   const isAgent = !!agentIp;
 
-  const fetchDetails = () => {
+  const fetchDetails = (ip) => {
     setLoading(true);
     setError(null);
     setDetails(null);
 
-    fetch(`https://ipapi.co/${targetIp}/json/`)
+    const url = geoipEnabled
+      ? `/geoip/${ip}`
+      : `https://ipapi.co/${ip}/json/`;
+
+    fetch(url)
       .then(res => {
         if (!res.ok) throw new Error(res.statusText || 'Fetch failed');
         return res.json();
       })
       .then(data => {
+        if (data.error) throw new Error(data.error);
         setDetails(data);
         setLoading(false);
       })
@@ -389,12 +394,16 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose }) {
       });
   };
 
-  // Reset state when targetIp changes
+  // Reset state when targetIp changes, and auto-fetch if enabled
   useEffect(() => {
     setDetails(null);
     setLoading(false);
     setError(null);
-  }, [targetIp]);
+
+    if (geoipEnabled && !isPrivateIP(targetIp)) {
+      fetchDetails(targetIp);
+    }
+  }, [targetIp, geoipEnabled]);
 
   if (!targetIp) return null;
 
@@ -454,9 +463,9 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose }) {
 
       <hr style={{ borderColor: '#004444' }} />
 
-      {!details && !loading && !error && !isPrivateIP(targetIp) && (
+      {!details && !loading && !error && !isPrivateIP(targetIp) && !geoipEnabled && (
         <button
-          onClick={fetchDetails}
+          onClick={() => fetchDetails(targetIp)}
           style={{
             width: '100%',
             padding: '8px',
@@ -505,6 +514,7 @@ export default function TrafficVisualizer() {
   const [agentsState, setAgentsState] = useState({}); // Renderable agents
   const [linksState, setLinksState] = useState({});
   const [despawnEffects, setDespawnEffects] = useState([]);
+  const [geoipEnabled, setGeoipEnabled] = useState(false);
 
   // Interaction State
   const [selectedPeer, setSelectedPeer] = useState(null);
@@ -527,10 +537,12 @@ export default function TrafficVisualizer() {
         const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
         const host = window.location.hostname;
         // Use fetched port
+        // Use fetched port
         const port = config.grpcPort || '50051';
         if (config.peerTimeout) {
           timeoutRef.current = config.peerTimeout;
         }
+        setGeoipEnabled(config.geoipEnabled || false);
         const serverUrl = `${protocol}//${host}:${port}`;
 
         console.log('Connecting to gRPC-Web Server at', serverUrl);
@@ -873,6 +885,7 @@ export default function TrafficVisualizer() {
           agentIp={selectedAgent}
           agentData={selectedAgent ? agentsRef.current[selectedAgent] : null}
           onClose={() => { setSelectedPeer(null); setSelectedAgent(null); }}
+          geoipEnabled={geoipEnabled}
         />
       )}
     </div>

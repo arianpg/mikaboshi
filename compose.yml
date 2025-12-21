@@ -10,3 +10,8 @@ services:
       - HTTP_PORT=8080
       - PEER_TIMEOUT=30
       - CHANNEL_CAPACITY=1000
+      - GEOIP_PATH=/data/geoip.mmdb
+    volumes:
+      # Mount the local geoip.mmdb file to the container
+      # Please place your geoip.mmdb file in the same directory as this compose.yml
+      - ./geoip.mmdb:/data/geoip.mmdb:ro
