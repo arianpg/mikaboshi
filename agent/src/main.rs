@@ -16,22 +16,22 @@ use packet::Packet;
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(long, default_value = "localhost:50051")]
+    #[arg(long, env = "MIKABOSHI_AGENT_SERVER", default_value = "localhost:50051")]
     server: String,
 
-    #[arg(long, default_value = "any")]
+    #[arg(long, env = "MIKABOSHI_AGENT_DEVICE", default_value = "any")]
     device: String,
 
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, env = "MIKABOSHI_AGENT_SNAPSHOT", default_value_t = 1024)]
     snapshot: i32,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, env = "MIKABOSHI_AGENT_PROMISCUOUS", default_value_t = false)]
     promiscuous: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, env = "MIKABOSHI_AGENT_MOCK", default_value_t = false)]
     mock: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, env = "MIKABOSHI_AGENT_IPV6", default_value_t = false)]
     ipv6: bool,
 
     #[arg(long, default_value_t = false)]
