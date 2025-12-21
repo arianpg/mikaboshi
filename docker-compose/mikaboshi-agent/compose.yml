@@ -1,0 +1,14 @@
+services:
+  agent:
+    container_name: mikaboshi-agent
+    image: arianpg/mikaboshi-agent:latest
+    network_mode: "host"
+    privileged: true
+    environment:
+      #- MIKABOSHI_AGENT_SERVER=serverip:50051
+      #- MIKABOSHI_AGENT_DEVICE=any
+      #- MIKABOSHI_AGENT_SNAPSHOT=1024
+      #- MIKABOSHI_AGENT_PROMISCUOUS=false
+      #- MIKABOSHI_AGENT_IPV6=false
+      #- MIKABOSHI_AGENT_MOCK=false
+    restart: unless-stopped

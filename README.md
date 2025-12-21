@@ -26,7 +26,7 @@ Rust製の高性能なエージェントとサーバー、そしてReact + Three
 ./mikaboshi-server
 
 # Docker起動
-# Docker Compose利用の場合は、compose.ymlを参考にしてください
+# Docker Compose利用の場合は、docker-compose/server/compose.ymlを参考にしてください
 docker run -d --name mikaboshi-server -p 8080:8080 -p 50051:50051 arianpg/mikaboshi-server:latest
 ```
 
@@ -45,20 +45,25 @@ docker run -d --name mikaboshi-server -p 8080:8080 -p 50051:50051 arianpg/mikabo
 エージェントは管理者権限(root)で実行する必要があります。
 
 ```bash
+# 直接起動
 sudo ./mikaboshi-agent --server localhost:50051 --device eth0
+
+# Docker起動
+# Docker Compose利用の場合は、docker-compose/agent/compose.ymlを参考にしてください
+docker run -d --name mikaboshi-agent arianpg/mikaboshi-agent:latest -e MIKABOSHI_AGENT_SERVER=serverip:50051
 ```
 
 **オプション:**
 
-| 引数オプション | 説明 | デフォルト値 |
-| --- | --- | --- |
-| `--server <string>` | 接続先サーバーのアドレス | "localhost:50051" |
-| `--device <string>` | キャプチャ対象のデバイス名 | "any" |
-| `--snapshot <u32>` | パケットキャプチャするデータの最大長 | 1024 |
-| `--promiscuous` | プロミスキャスモードを有効にします | false |
-| `--ipv6` | IPv6トラフィックもキャプチャ対象にします (デフォルトはIPv4のみ) | false |
-| `--mock` | 実際のトラフィックの代わりにモックデータを生成して送信します | false |
-| `--list_devices` |利用可能なデバイス一覧を表示して終了します<br/>Windows環境でのネットワークインターフェース確認用 | false |
+| 引数オプション | Docker環境変数 | 説明 | デフォルト値 |
+| --- | --- | --- | --- |
+| `--server <string>` | `MIKABOSHI_AGENT_SERVER` | 接続先サーバーのアドレス | "localhost:50051" |
+| `--device <string>` | `MIKABOSHI_AGENT_DEVICE` | キャプチャ対象のデバイス名 | "any" |
+| `--snapshot <u32>` | `MIKABOSHI_AGENT_SNAPSHOT` | パケットキャプチャするデータの最大長 | 1024 |
+| `--promiscuous` | `MIKABOSHI_AGENT_PROMISCUOUS` | プロミスキャスモードを有効にします | false |
+| `--ipv6` | `MIKABOSHI_AGENT_IPV6` | IPv6トラフィックもキャプチャ対象にします (デフォルトはIPv4のみ) | false |
+| `--mock` | `MIKABOSHI_AGENT_MOCK` | 実際のトラフィックの代わりにモックデータを生成して送信します | false |
+| `--list_devices` | - | 利用可能なデバイス一覧を表示して終了します<br/>Windows環境でのネットワークインターフェース確認用 | false |
 
 ### 3. ブラウザでアクセス
 

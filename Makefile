@@ -1,9 +1,6 @@
-.PHONY: build build-agent build-agent-windows build-server build-web generate-web-proto build-docker-server
+.PHONY: build-all build-agent build-agent-windows build-server build-web generate-web-proto build-docker-all build-docker-server build-docker-agent
 
 build-all: build-agent build-agent-windows build-server
-
-build-docker-server: build-server
-	docker build -f server/runtime.Dockerfile -t mikaboshi-server:latest build/server
 
 build-agent:
 	mkdir -p build/agent
@@ -30,4 +27,11 @@ generate-web-proto:
 		--ts_proto_out=web/src/proto \
 		--ts_proto_opt=outputServices=default,env=browser,useObservables=true,esModuleInterop=true,outputClientImpl=grpc-web \
 		packet.proto
-	
+
+build-docker-all: build-docker-server build-docker-agent
+
+build-docker-server: build-server
+	docker build -f server/runtime.Dockerfile -t mikaboshi-server:latest build/server
+
+build-docker-agent: build-agent
+	docker build -f agent/runtime.Dockerfile -t mikaboshi-agent:latest build/agent

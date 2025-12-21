@@ -1,5 +1,5 @@
 services:
-  server:
+  mikaboshi-server:
     container_name: mikaboshi-server
     image: arianpg/mikaboshi-server:latest
     ports:
