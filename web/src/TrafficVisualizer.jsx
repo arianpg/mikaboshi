@@ -148,6 +148,24 @@ const isPrivateIP = (ip) => {
   return false;
 };
 
+// --- Helper: Convert Bytes to IP String ---
+const bytesToIp = (bytes) => {
+  if (!bytes || bytes.length === 0) return "";
+  if (bytes.length === 4) {
+    return bytes.join('.');
+  }
+  if (bytes.length === 16) {
+    // IPv6
+    const parts = [];
+    for (let i = 0; i < 16; i += 2) {
+      const part = (bytes[i] << 8) | bytes[i + 1];
+      parts.push(part.toString(16));
+    }
+    return parts.join(':').replace(/(^|:)0(:0)*:0(:|$)/, '$1::$3').replace(/:{3,4}/, '::');
+  }
+  return "";
+};
+
 function Peer({ ip, position, isHot, isSelected, onClick, onDragStart, onDragEnd, onDrag }) {
   const groupRef = useRef();
   const ring1Ref = useRef();
@@ -512,7 +530,7 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled
 
 import { retry, delay, repeat } from 'rxjs/operators';
 import { timer } from 'rxjs';
-import { AgentServiceClientImpl, Empty, GrpcWebImpl } from './proto/packet';
+import { AgentServiceClientImpl, Empty, GrpcWebImpl, PacketType, Protocol, protocolToJSON } from './proto/packet';
 
 export default function TrafficVisualizer() {
   // useRefs for data (Source of Truth)
@@ -574,106 +592,113 @@ export default function TrafficVisualizer() {
             repeat({ delay: 3000 })
           )
           .subscribe({
-            next: (data) => {
-              // data is Packet object directly
-              if (data.type !== 'traffic') return;
+            next: (batch) => {
+              // batch is PacketBatch object
+              if (!batch.packets || batch.packets.length === 0) return;
 
-              const timestamp = Date.now();
+              batch.packets.forEach(data => {
+                if (data.srcIp.length === 0) return; // Basic validation since we removed type check
 
-              // Identity Check - Agents
-              const isLoopback = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
+                const timestamp = Date.now();
 
-              const registerAgent = (ip) => {
-                if (!ip || isLoopback(ip) || ip === "AGENT") return;
+                const srcIp = bytesToIp(data.srcIp);
+                const dstIp = bytesToIp(data.dstIp);
 
-                // Promote Peer to Agent if needed
-                if (peersRef.current[ip]) {
-                  delete peersRef.current[ip];
-                  if (selectedPeer === ip) setSelectedPeer(null);
-                  setPeersState({ ...peersRef.current });
-                }
+                // Identity Check - Agents
+                const isLoopback = (ip) => ip === '127.0.0.1' || ip === '::1' || ip === 'localhost';
 
-                if (!agentsRef.current[ip]) {
-                  agentsRef.current[ip] = {
-                    ip: ip,
-                    lastSeen: timestamp,
-                    position: new THREE.Vector3(0, 2, 0) // Default
-                  };
-                } else {
-                  agentsRef.current[ip].lastSeen = timestamp;
-                }
-              };
+                const registerAgent = (ip) => {
+                  if (!ip || isLoopback(ip) || ip === "AGENT") return;
 
-              if (data.srcIsAgent) registerAgent(data.srcIp);
-              if (data.dstIsAgent) registerAgent(data.dstIp);
-
-              // Update Peers
-              const currentPeers = peersRef.current;
-              const processPeer = (ip, isAgent, role) => {
-                if (!ip) return;
-                if (isAgent) return;
-                if (agentsRef.current[ip]) return;
-                if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return;
-
-                if (!currentPeers[ip]) {
-                  const angle = Math.random() * Math.PI * 2;
-                  currentPeers[ip] = {
-                    position: new THREE.Vector3(Math.cos(angle) * PEER_RADIUS, Math.random() * 5 - 2, Math.sin(angle) * PEER_RADIUS),
-                    lastSeen: timestamp,
-                    volume: 0,
-                    protocols: new Set(),
-                    portsIn: new Set(),
-                    portsOut: new Set()
-                  };
-                  setPeersState({ ...currentPeers });
-                } else {
-                  currentPeers[ip].lastSeen = timestamp;
-                }
-                if (currentPeers[ip]) {
-                  currentPeers[ip].volume += data.size;
-                  if (data.proto) currentPeers[ip].protocols.add(data.proto);
-                  if (role === 'src') {
-                    if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsOut.add(data.dstPort);
-                  } else {
-                    if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsIn.add(data.dstPort);
+                  // Promote Peer to Agent if needed
+                  if (peersRef.current[ip]) {
+                    delete peersRef.current[ip];
+                    if (selectedPeer === ip) setSelectedPeer(null);
+                    setPeersState({ ...peersRef.current });
                   }
-                  if (currentPeers[ip].protocols.size > 5) currentPeers[ip].protocols = new Set(Array.from(currentPeers[ip].protocols).slice(-5));
-                  if (currentPeers[ip].portsIn.size > 5) currentPeers[ip].portsIn = new Set(Array.from(currentPeers[ip].portsIn).slice(-5));
-                  if (currentPeers[ip].portsOut.size > 5) currentPeers[ip].portsOut = new Set(Array.from(currentPeers[ip].portsOut).slice(-5));
+
+                  if (!agentsRef.current[ip]) {
+                    agentsRef.current[ip] = {
+                      ip: ip,
+                      lastSeen: timestamp,
+                      position: new THREE.Vector3(0, 2, 0) // Default
+                    };
+                  } else {
+                    agentsRef.current[ip].lastSeen = timestamp;
+                  }
+                };
+
+                if (data.srcIsAgent) registerAgent(srcIp);
+                if (data.dstIsAgent) registerAgent(dstIp);
+
+                // Update Peers
+                const currentPeers = peersRef.current;
+                const processPeer = (ip, isAgent, role) => {
+                  if (!ip) return;
+                  if (isAgent) return;
+                  if (agentsRef.current[ip]) return;
+                  if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return;
+
+                  if (!currentPeers[ip]) {
+                    const angle = Math.random() * Math.PI * 2;
+                    currentPeers[ip] = {
+                      position: new THREE.Vector3(Math.cos(angle) * PEER_RADIUS, Math.random() * 5 - 2, Math.sin(angle) * PEER_RADIUS),
+                      lastSeen: timestamp,
+                      volume: 0,
+                      protocols: new Set(),
+                      portsIn: new Set(),
+                      portsOut: new Set()
+                    };
+                    setPeersState({ ...currentPeers });
+                  } else {
+                    currentPeers[ip].lastSeen = timestamp;
+                  }
+                  if (currentPeers[ip]) {
+                    currentPeers[ip].volume += data.size;
+                    if (data.proto) currentPeers[ip].protocols.add(protocolToJSON(data.proto));
+                    if (role === 'src') {
+                      if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsOut.add(data.dstPort);
+                    } else {
+                      if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsIn.add(data.dstPort);
+                    }
+                    if (currentPeers[ip].protocols.size > 5) currentPeers[ip].protocols = new Set(Array.from(currentPeers[ip].protocols).slice(-5));
+                    if (currentPeers[ip].portsIn.size > 5) currentPeers[ip].portsIn = new Set(Array.from(currentPeers[ip].portsIn).slice(-5));
+                    if (currentPeers[ip].portsOut.size > 5) currentPeers[ip].portsOut = new Set(Array.from(currentPeers[ip].portsOut).slice(-5));
+                  }
                 }
-              }
 
-              processPeer(data.srcIp, data.srcIsAgent, 'src');
-              processPeer(data.dstIp, data.dstIsAgent, 'dst');
+                processPeer(srcIp, data.srcIsAgent, 'src');
+                processPeer(dstIp, data.dstIsAgent, 'dst');
 
-              // Traffic Links
-              const getPos = (ip) => {
-                if (agentsRef.current[ip]) return agentsRef.current[ip].position;
-                if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return new THREE.Vector3(0, 2, 0);
-                return currentPeers[ip]?.position || new THREE.Vector3(0, 0, 0);
-              };
+                // Traffic Links
+                const getPos = (ip) => {
+                  if (agentsRef.current[ip]) return agentsRef.current[ip].position;
+                  if (ip === "AGENT" || ip === "127.0.0.1" || ip === "localhost") return new THREE.Vector3(0, 2, 0);
+                  return currentPeers[ip]?.position || new THREE.Vector3(0, 0, 0);
+                };
 
-              const srcPos = getPos(data.srcIp);
-              const dstPos = getPos(data.dstIp);
+                const srcPos = getPos(srcIp);
+                const dstPos = getPos(dstIp);
 
-              if (srcPos && dstPos && !srcPos.equals(dstPos)) {
-                const ids = [data.srcIp, data.dstIp].sort();
-                const linkId = ids.join('-');
+                if (srcPos && dstPos && !srcPos.equals(dstPos)) {
+                  const ids = [srcIp, dstIp].sort();
+                  const linkId = ids.join('-');
 
-                if (!linksRef.current[linkId]) {
-                  linksRef.current[linkId] = {
-                    start: srcPos,
-                    end: dstPos,
-                    volume: 0,
-                    lastSeen: timestamp
-                  };
+                  if (!linksRef.current[linkId]) {
+                    linksRef.current[linkId] = {
+                      start: srcPos,
+                      end: dstPos,
+                      volume: 0,
+                      lastSeen: timestamp
+                    };
+                  }
+
+                  linksRef.current[linkId].volume += Math.max(data.size, 500);
+                  linksRef.current[linkId].lastSeen = timestamp;
+                  linksRef.current[linkId].start = srcPos;
+                  linksRef.current[linkId].end = dstPos;
                 }
-
-                linksRef.current[linkId].volume += Math.max(data.size, 500);
-                linksRef.current[linkId].lastSeen = timestamp;
-                linksRef.current[linkId].start = srcPos;
-                linksRef.current[linkId].end = dstPos;
-              }
+              });
             },
             error: (err) => console.error('gRPC Error:', err),
             complete: () => console.log('gRPC Stream Completed')
