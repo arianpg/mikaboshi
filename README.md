@@ -101,6 +101,10 @@ make build-server
 make build-docker-server
 ```
 
+## AIによる開発支援
+
+本プロジェクトのコーディングには、Gemini 3 Proを活用しています。
+
 ## ライセンス
 
 MIT License
