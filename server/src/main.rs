@@ -119,26 +119,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn gRPC server
     tokio::spawn(async move {
         Server::builder()
-            .accept_http1(true) // Required for gRPC-Web
-            .layer(CorsLayer::new()
-                .allow_origin(Any)
-                .allow_headers(Any)
-                .allow_methods(Any)
-            )
-            .add_service(service)
-            .serve(grpc_addr)
-            .await
-            .unwrap();
+        .accept_http1(true) // Required for gRPC-Web
+        .layer(CorsLayer::new()
+            .allow_origin(Any)
+            .allow_headers(Any)
+            .allow_methods(Any)
+        )
+        .add_service(service)
+        .serve(grpc_addr)
+        .await
+        .unwrap();
     });
 
     // --- GeoIP Setup ---
+    let mut attribution_text: Option<String> = None;
+    let mut attribution_url: Option<String> = None;
+
     let geoip_reader = if let Some(path) = &args.geoip_path {
         println!("Loading GeoIP database from: {}", path);
         match maxminddb::Reader::open_readfile(path) {
-            Ok(reader) => {
-                println!("GeoIP database loaded successfully.");
-                Some(std::sync::Arc::new(reader))
-            },
+            Ok(reader) => Some(std::sync::Arc::new(reader)),
             Err(e) => {
                 eprintln!("Failed to load GeoIP database: {}. Continuing without local GeoIP.", e);
                 None
@@ -148,9 +148,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    if let Some(reader) = &geoip_reader {
+        println!("GeoIP database loaded successfully.");
+        
+        // Auto-detect attribution
+        let metadata = &reader.metadata;
+        let db_type = &metadata.database_type;
+        let description = metadata.description.get("en").map(|s| s.as_str()).unwrap_or("");
+        
+        println!("Database Type: {}", db_type);
+        println!("Description: {}", description);
+
+        if db_type.contains("DBIP") || description.contains("DB-IP") {
+            println!("Detected DB-IP database. Setting attribution.");
+            attribution_text = Some("IP Geolocation by DB-IP".to_string());
+            attribution_url = Some("https://db-ip.com".to_string());
+        } else {
+            // Fallback to database type
+            attribution_text = Some(db_type.clone());
+            attribution_url = None;
+        }
+    } else {
+        // Fallback to ipapi
+        println!("Using ipapi.co for GeoIP.");
+        attribution_text = Some("IP Geolocation by ipapi.co".to_string());
+        attribution_url = Some("https://ipapi.co".to_string());
+    }
+
     let geoip_state = geoip_reader.clone();
     let config_args = std::sync::Arc::new(args);
     let config_args_monitor = config_args.clone();
+
+    // Capture attributions for move
+    let attr_text = attribution_text.clone();
+    let attr_url = attribution_url.clone();
 
     // --- HTTP Server (Static Files) ---
     // Serve static files from web/dist
@@ -159,7 +190,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::Json(serde_json::json!({
                 "grpcPort": config_args_monitor.grpc_port,
                 "peerTimeout": config_args_monitor.peer_timeout * 1000, // Convert to ms
-                "geoipEnabled": geoip_state.is_some()
+                "geoipEnabled": geoip_state.is_some(),
+                "geoipAttributionText": attr_text,
+                "geoipAttributionUrl": attr_url
             }))
         }))
         .route("/geoip/:ip", axum::routing::get(move |axum::extract::Path(ip): axum::extract::Path<String>| {

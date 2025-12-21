@@ -70,6 +70,7 @@ sudo ./mikaboshi-agent --server localhost:50051 --device eth0
 - **データ量表現**: トラフィックのサイズに応じてラインの色が変化します。
 - **詳細情報**: PeerのIPアドレスや国情報を表示します。
     - デフォルトでは[ipapi](https://ipapi.co)を使用しますが、ローカルのMMDBファイル(要別途入手)を使用することも可能です。
+    - [DB-IP IP to City Lite database](https://db-ip.com/db/download/ip-to-city-lite) のMMDBファイルで動作確認しています
 
 ## ビルド
 

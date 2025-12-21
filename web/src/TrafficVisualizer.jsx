@@ -360,7 +360,7 @@ function DespawnEffect({ position, onComplete }) {
 
 // --- Info Panel Component ---
 // --- Info Panel Component ---
-function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled }) {
+function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled, attribution }) {
   const [details, setDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -491,6 +491,19 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled
         </>
       )}
       {error && <div style={{ color: 'red' }}>{error}</div>}
+
+      {/* Attribution */}
+      {attribution && attribution.text && (
+        <div style={{ marginTop: '15px', fontSize: '0.8em', textAlign: 'center', opacity: 0.8 }}>
+          {attribution.url ? (
+            <a href={attribution.url} target="_blank" rel="noopener noreferrer" style={{ color: '#00ffcc', textDecoration: 'none' }}>
+              {attribution.text}
+            </a>
+          ) : (
+            <span style={{ color: '#00ffcc' }}>{attribution.text}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -515,6 +528,7 @@ export default function TrafficVisualizer() {
   const [linksState, setLinksState] = useState({});
   const [despawnEffects, setDespawnEffects] = useState([]);
   const [geoipEnabled, setGeoipEnabled] = useState(false);
+  const [attribution, setAttribution] = useState(null);
 
   // Interaction State
   const [selectedPeer, setSelectedPeer] = useState(null);
@@ -543,6 +557,7 @@ export default function TrafficVisualizer() {
           timeoutRef.current = config.peerTimeout;
         }
         setGeoipEnabled(config.geoipEnabled || false);
+        setAttribution({ text: config.geoipAttributionText, url: config.geoipAttributionUrl });
         const serverUrl = `${protocol}//${host}:${port}`;
 
         console.log('Connecting to gRPC-Web Server at', serverUrl);
@@ -886,6 +901,7 @@ export default function TrafficVisualizer() {
           agentData={selectedAgent ? agentsRef.current[selectedAgent] : null}
           onClose={() => { setSelectedPeer(null); setSelectedAgent(null); }}
           geoipEnabled={geoipEnabled}
+          attribution={attribution}
         />
       )}
     </div>
