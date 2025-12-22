@@ -44,6 +44,18 @@ struct Args {
     batch_interval: u64,
 }
 
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct RawPacket {
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    src_is_agent: bool,
+    dst_is_agent: bool,
+    size: i32,
+    proto: i32, // store as i32 to match proto enum value
+    src_port: i32,
+    dst_port: i32,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -111,14 +123,12 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
     println!("Connected to server");
 
     // Create a channel for streaming packets
-    // Make channel buffer large enough to hold a few batches
-    let channel_size = args.batch_size * 10;
-    let (tx, rx) = mpsc::channel(channel_size); 
+    // Channel now carries simple batches (Vec<RawPacket>) to reduce lock overhead
+    let (tx, rx) = mpsc::channel(args.batch_size); 
 
     // create a stream of batches
     use tokio_stream::StreamExt;
     let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-        .chunks_timeout(args.batch_size, Duration::from_millis(args.batch_interval))
         .map(|packets| compress_packets(packets));
 
     // Spawn the gRPC client stream handler
@@ -132,7 +142,7 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
 
     if args.mock {
         println!("Starting in MOCK mode (Batch: {} pkts, Interval: {} ms)", args.batch_size, args.batch_interval);
-        generate_mock_traffic(tx).await;
+        generate_mock_traffic(tx, args.batch_size).await;
     } else {
         println!("Starting in LIVE capture mode on device {} (Batch: {} pkts, Interval: {} ms)", args.device, args.batch_size, args.batch_interval);
         let tx_clone = tx.clone();
@@ -146,7 +156,7 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
         if let Err(e) = result {
              eprintln!("Error opening device {}: {}", args.device, e);
              eprintln!("Falling back to MOCK mode due to error.");
-             generate_mock_traffic(tx).await;
+             generate_mock_traffic(tx, args.batch_size).await;
         }
     }
     
@@ -157,40 +167,48 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
     Err("Connection lost".into())
 }
 
-fn compress_packets(packets: Vec<Packet>) -> packet::PacketBatch {
+fn compress_packets(packets: Vec<RawPacket>) -> packet::PacketBatch {
     use std::collections::HashMap;
 
-    // Key: (src_ip, dst_ip, src_is_agent, dst_is_agent, proto, src_port, dst_port)
-    type PacketKey = (Vec<u8>, Vec<u8>, bool, bool, i32, i32, i32);
-    
-    let mut map: HashMap<PacketKey, Packet> = HashMap::new();
+    // Key IS the RawPacket itself since it derives Hash/Eq
+    let mut map: HashMap<RawPacket, i32> = HashMap::new();
 
     for p in packets {
-        let key = (
-            p.src_ip.clone(), 
-            p.dst_ip.clone(), 
-            p.src_is_agent, 
-            p.dst_is_agent, 
-            p.proto, 
-            p.src_port, 
-            p.dst_port
-        );
-
-        map.entry(key)
-           .and_modify(|existing| existing.size += p.size)
-           .or_insert(p);
+        map.entry(p.clone())
+           .and_modify(|size| *size += p.size)
+           .or_insert(p.size);
     }
 
+    let packets = map.into_iter().map(|(k, total_size)| {
+        let (src_ip_bytes, dst_ip_bytes) = match (k.src_ip, k.dst_ip) {
+            (IpAddr::V4(s), IpAddr::V4(d)) => (s.octets().to_vec(), d.octets().to_vec()),
+            (IpAddr::V6(s), IpAddr::V6(d)) => (s.octets().to_vec(), d.octets().to_vec()),
+            (IpAddr::V4(s), IpAddr::V6(d)) => (s.octets().to_vec(), d.octets().to_vec()), // Should not happen usually but valid
+            (IpAddr::V6(s), IpAddr::V4(d)) => (s.octets().to_vec(), d.octets().to_vec()),
+        };
+
+        Packet {
+            src_ip: src_ip_bytes,
+            dst_ip: dst_ip_bytes,
+            src_is_agent: k.src_is_agent,
+            dst_is_agent: k.dst_is_agent,
+            size: total_size,
+            proto: k.proto,
+            src_port: k.src_port,
+            dst_port: k.dst_port,
+        }
+    }).collect();
+
     packet::PacketBatch {
-        packets: map.into_values().collect()
+        packets
     }
 }
 
-fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn run_live_capture(args: Args, tx: mpsc::Sender<Vec<RawPacket>>, server_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cap = Capture::from_device(args.device.as_str())?
         .promisc(args.promiscuous)
         .snaplen(args.snapshot)
-        .timeout(1000) // 1s timeout to allow checking for exit or other things
+        .timeout(100) // Lower pcap timeout to allow frequent flush checks
         .open()?;
 
     // Set BPF filter
@@ -199,25 +217,39 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> R
     cap.filter(&filter, true)?;
     
     // Identify local IPs
-    let mut local_ips = HashSet::new();
+    let mut local_ips: HashSet<IpAddr> = HashSet::new();
     if let Ok(devs) = Device::list() {
         for d in devs {
             for address in d.addresses {
-                local_ips.insert(address.addr.to_string());
+                local_ips.insert(address.addr);
             }
         }
     }
-    local_ips.insert("127.0.0.1".to_string());
-    local_ips.insert("::1".to_string());
+    local_ips.insert(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+    local_ips.insert(IpAddr::V6(std::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)));
 
     println!("Capturing on device {}", args.device);
     println!("Local IPs: {:?}", local_ips);
 
     let datalink = cap.get_datalink();
+    
+    // Local buffer for micro-batching
+    let mut buffer: Vec<RawPacket> = Vec::with_capacity(args.batch_size);
+    let mut last_flush = std::time::Instant::now();
+    let flush_interval = std::time::Duration::from_millis(args.batch_interval);
 
     loop {
+        // Check flush timer at start of loop (in case we looped from a packet)
+        if !buffer.is_empty() && last_flush.elapsed() >= flush_interval {
+             if let Err(_) = tx.blocking_send(buffer) {
+                return Ok(());
+             }
+             buffer = Vec::with_capacity(args.batch_size);
+             last_flush = std::time::Instant::now();
+        }
+
         // We need a way to check if channel is closed to stop capture, 
-        // but pcap blocks. The timeout(1000) helps us yield.
+        // but pcap blocks. The timeout(100) helps us yield.
         if tx.is_closed() {
             return Ok(());
         }
@@ -244,39 +276,26 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> R
 
                 // Try parsing
                 if let Ok(headers) = headers_result {
-                    let mut src_ip_bytes: Vec<u8> = Vec::new();
-                    let mut dst_ip_bytes: Vec<u8> = Vec::new();
-
-                    let mut src_ip_str = String::new(); // for local checking
-                    let mut dst_ip_str = String::new(); // for local checking
-                    
                     if let Some(ip) = headers.ip {
-                        match ip {
-                            IpHeader::Version4(ipv4, _) => {
-                                src_ip_bytes = ipv4.source.to_vec();
-                                dst_ip_bytes = ipv4.destination.to_vec();
-                                src_ip_str = ipv4.source.iter().map(|b| b.to_string()).collect::<Vec<String>>().join(".");
-                                dst_ip_str = ipv4.destination.iter().map(|b| b.to_string()).collect::<Vec<String>>().join(".");
-                            },
+                        let (src_ip, dst_ip) = match ip {
+                            IpHeader::Version4(ipv4, _) => (
+                                IpAddr::from(ipv4.source),
+                                IpAddr::from(ipv4.destination)
+                            ),
                             IpHeader::Version6(ipv6, _) => {
                                 if !args.ipv6 {
                                     continue;
                                 }
-                                src_ip_bytes = ipv6.source.to_vec();
-                                dst_ip_bytes = ipv6.destination.to_vec();
-                                
-                                use std::net::Ipv6Addr;
-                                let s = Ipv6Addr::from(ipv6.source);
-                                let d = Ipv6Addr::from(ipv6.destination);
-                                src_ip_str = s.to_string();
-                                dst_ip_str = d.to_string();
+                                (
+                                    IpAddr::from(ipv6.source),
+                                    IpAddr::from(ipv6.destination)
+                                )
                             } 
-                        }
+                        };
                         
-                        // Check if agent
-                         let src_is_agent = local_ips.contains(&src_ip_str);
-                         let dst_is_agent = local_ips.contains(&dst_ip_str);
-
+                        let src_is_agent = local_ips.contains(&src_ip);
+                        let dst_is_agent = local_ips.contains(&dst_ip);
+                        
                          if !src_is_agent && !dst_is_agent {
                              continue;
                          }
@@ -303,9 +322,9 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> R
                             }
                         }
 
-                        let info = Packet {
-                            src_ip: src_ip_bytes,
-                            dst_ip: dst_ip_bytes,
+                        let info = RawPacket {
+                            src_ip,
+                            dst_ip,
                             src_is_agent,
                             dst_is_agent,
                             size: packet.header.len as i32,
@@ -314,13 +333,21 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> R
                             dst_port,
                         };
 
-                        if let Err(_) = tx.blocking_send(info) {
-                            return Ok(()); // channel closed
+                        buffer.push(info);
+                        
+                        // Buffer full check
+                        if buffer.len() >= args.batch_size {
+                            if let Err(_) = tx.blocking_send(buffer) {
+                                return Ok(()); // channel closed
+                            }
+                            buffer = Vec::with_capacity(args.batch_size);
+                            last_flush = std::time::Instant::now();
                         }
                     }
                 }
             },
             Err(pcap::Error::TimeoutExpired) => {
+                // Just continue to loop top to check flush timer
                 continue;
             },
             Err(e) => {
@@ -330,22 +357,27 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Packet>, server_port: u16) -> R
     }
 }
 
-async fn generate_mock_traffic(tx: mpsc::Sender<Packet>) {
+async fn generate_mock_traffic(tx: mpsc::Sender<Vec<RawPacket>>, batch_size: usize) {
     // 192.168.1.10, .20, 10.0.0.5, 172.16.0.3
     let peers = vec![
-        vec![192, 168, 1, 10], 
-        vec![192, 168, 1, 20], 
-        vec![10, 0, 0, 5], 
-        vec![172, 16, 0, 3]
+        IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)), 
+        IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 20)), 
+        IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5)), 
+        IpAddr::V4(std::net::Ipv4Addr::new(172, 16, 0, 3))
     ];
-    let localhost = vec![127, 0, 0, 1];
+    let localhost = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 
     let mut rng = rand::thread_rng();
     use rand::Rng;
 
+    let mut buffer: Vec<RawPacket> = Vec::with_capacity(batch_size);
+
     loop {
-        let delay = rng.gen_range(100..500);
-        sleep(Duration::from_millis(delay)).await;
+        // High speed mock
+        let delay = rng.gen_range(0..5); // Faster!
+        if delay > 0 {
+             sleep(Duration::from_millis(delay)).await;
+        }
 
         if tx.is_closed() { return; }
 
@@ -361,7 +393,7 @@ async fn generate_mock_traffic(tx: mpsc::Sender<Packet>) {
         if src == localhost { src_is_agent = true; }
         if dst == localhost { dst_is_agent = true; }
 
-        let info = Packet {
+        let info = RawPacket {
             src_ip: src,
             dst_ip: dst,
             src_is_agent,
@@ -371,9 +403,14 @@ async fn generate_mock_traffic(tx: mpsc::Sender<Packet>) {
             src_port: 0,
             dst_port: 0,
         };
-
-        if tx.send(info).await.is_err() {
-            return;
+        
+        buffer.push(info);
+        
+        if buffer.len() >= batch_size {
+            if tx.send(buffer).await.is_err() {
+                return;
+            }
+            buffer = Vec::with_capacity(batch_size);
         }
     }
 }
