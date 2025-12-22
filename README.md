@@ -67,6 +67,8 @@ docker run -d --name mikaboshi-agent --network host --privileged -e MIKABOSHI_AG
 | `--ipv6` | `MIKABOSHI_AGENT_IPV6` | IPv6トラフィックもキャプチャ対象にします (デフォルトはIPv4のみ) | false |
 | `--mock` | `MIKABOSHI_AGENT_MOCK` | 実際のトラフィックの代わりにモックデータを生成して送信します | false |
 | `--list_devices` | - | 利用可能なデバイス一覧を表示して終了します<br/>Windows環境でのネットワークインターフェース確認用 | false |
+| `--batch-size <u32>` | `MIKABOSHI_AGENT_BATCH_SIZE` | パケット集約数 | 10000 |
+| `--batch-interval <u32>` | `MIKABOSHI_AGENT_BATCH_INTERVAL` | 集約パケット送信間隔(ms) | 100 |
 
 ### 3. ブラウザでアクセス
 

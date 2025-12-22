@@ -36,6 +36,12 @@ struct Args {
 
     #[arg(long, default_value_t = false)]
     list_devices: bool,
+
+    #[arg(long, env = "MIKABOSHI_AGENT_BATCH_SIZE", default_value_t = 10000)]
+    batch_size: usize,
+
+    #[arg(long, env = "MIKABOSHI_AGENT_BATCH_INTERVAL", default_value_t = 100)]
+    batch_interval: u64,
 }
 
 #[tokio::main]
@@ -105,12 +111,14 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
     println!("Connected to server");
 
     // Create a channel for streaming packets
-    let (tx, rx) = mpsc::channel(1024); // Increased buffer size
+    // Make channel buffer large enough to hold a few batches
+    let channel_size = args.batch_size * 10;
+    let (tx, rx) = mpsc::channel(channel_size); 
 
     // create a stream of batches
     use tokio_stream::StreamExt;
     let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-        .chunks_timeout(100, Duration::from_millis(100))
+        .chunks_timeout(args.batch_size, Duration::from_millis(args.batch_interval))
         .map(|packets| compress_packets(packets));
 
     // Spawn the gRPC client stream handler
@@ -123,10 +131,10 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
     });
 
     if args.mock {
-        println!("Starting in MOCK mode");
+        println!("Starting in MOCK mode (Batch: {} pkts, Interval: {} ms)", args.batch_size, args.batch_interval);
         generate_mock_traffic(tx).await;
     } else {
-        println!("Starting in LIVE capture mode on device {}", args.device);
+        println!("Starting in LIVE capture mode on device {} (Batch: {} pkts, Interval: {} ms)", args.device, args.batch_size, args.batch_interval);
         let tx_clone = tx.clone();
         let args_clone = args.clone();
         
