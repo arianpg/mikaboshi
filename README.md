@@ -53,7 +53,7 @@ sudo ./mikaboshi-agent --server localhost:50051 --device eth0
 
 # Docker起動
 # Docker Compose利用の場合は、docker-compose/agent/compose.ymlを参考にしてください
-docker run -d --name mikaboshi-agent arianpg/mikaboshi-agent:latest -e MIKABOSHI_AGENT_SERVER=serverip:50051
+docker run -d --name mikaboshi-agent --network host --privileged -e MIKABOSHI_AGENT_SERVER=serverip:50051 arianpg/mikaboshi-agent:latest
 ```
 
 **オプション:**
