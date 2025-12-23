@@ -1,6 +1,6 @@
 use clap::Parser;
 use pcap::{Capture, Device};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -22,7 +22,7 @@ struct Args {
     #[arg(long, env = "MIKABOSHI_AGENT_DEVICE", default_value = "any")]
     device: String,
 
-    #[arg(long, env = "MIKABOSHI_AGENT_SNAPSHOT", default_value_t = 1024)]
+    #[arg(long, env = "MIKABOSHI_AGENT_SNAPSHOT", default_value_t = 128)]
     snapshot: i32,
 
     #[arg(long, env = "MIKABOSHI_AGENT_PROMISCUOUS", default_value_t = false)]
@@ -37,7 +37,7 @@ struct Args {
     #[arg(long, default_value_t = false)]
     list_devices: bool,
 
-    #[arg(long, env = "MIKABOSHI_AGENT_BATCH_SIZE", default_value_t = 10000)]
+    #[arg(long, env = "MIKABOSHI_AGENT_BATCH_SIZE", default_value_t = 50000)]
     batch_size: usize,
 
     #[arg(long, env = "MIKABOSHI_AGENT_BATCH_INTERVAL", default_value_t = 100)]
@@ -45,12 +45,11 @@ struct Args {
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct RawPacket {
+struct FlowKey {
     src_ip: IpAddr,
     dst_ip: IpAddr,
     src_is_agent: bool,
     dst_is_agent: bool,
-    size: i32,
     proto: i32, // store as i32 to match proto enum value
     src_port: i32,
     dst_port: i32,
@@ -59,6 +58,7 @@ struct RawPacket {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+
 
     let server_url = if args.server.starts_with("http") {
         args.server.clone()
@@ -123,13 +123,13 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
     println!("Connected to server");
 
     // Create a channel for streaming packets
-    // Channel now carries simple batches (Vec<RawPacket>) to reduce lock overhead
-    let (tx, rx) = mpsc::channel(args.batch_size); 
+    // Adjusted buffer size since we are sending pre-aggregated batches
+    let (tx, rx) = mpsc::channel(32); 
 
     // create a stream of batches
     use tokio_stream::StreamExt;
     let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-        .map(|packets| compress_packets(packets));
+        .map(|packets| packet::PacketBatch { packets });
 
     // Spawn the gRPC client stream handler
     let mut client_clone = client.clone();
@@ -141,10 +141,11 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
     });
 
     if args.mock {
-        println!("Starting in MOCK mode (Batch: {} pkts, Interval: {} ms)", args.batch_size, args.batch_interval);
-        generate_mock_traffic(tx, args.batch_size).await;
+        println!("Starting in MOCK mode (Batch Flush Threshold: {} entries, Interval: {} ms)", args.batch_size, args.batch_interval);
+        generate_mock_traffic(tx, args.batch_size, args.batch_interval).await;
     } else {
-        println!("Starting in LIVE capture mode on device {} (Batch: {} pkts, Interval: {} ms)", args.device, args.batch_size, args.batch_interval);
+        println!("Starting in LIVE capture mode on device {} (Batch Flush Threshold: {} entries, Interval: {} ms, Snaplen: {})", 
+                 args.device, args.batch_size, args.batch_interval, args.snapshot);
         let tx_clone = tx.clone();
         let args_clone = args.clone();
         
@@ -156,7 +157,7 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
         if let Err(e) = result {
              eprintln!("Error opening device {}: {}", args.device, e);
              eprintln!("Falling back to MOCK mode due to error.");
-             generate_mock_traffic(tx, args.batch_size).await;
+             generate_mock_traffic(tx, args.batch_size, args.batch_interval).await;
         }
     }
     
@@ -167,48 +168,63 @@ async fn run_agent(server_url: &str, args: &Args, server_port: u16) -> Result<()
     Err("Connection lost".into())
 }
 
-fn compress_packets(packets: Vec<RawPacket>) -> packet::PacketBatch {
-    use std::collections::HashMap;
+fn packet_from_key(key: FlowKey, size: i32) -> Packet {
+    let (src_ip_bytes, dst_ip_bytes) = match (key.src_ip, key.dst_ip) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => (s.octets().to_vec(), d.octets().to_vec()),
+        (IpAddr::V6(s), IpAddr::V6(d)) => (s.octets().to_vec(), d.octets().to_vec()),
+        (IpAddr::V4(s), IpAddr::V6(d)) => (s.octets().to_vec(), d.octets().to_vec()),
+        (IpAddr::V6(s), IpAddr::V4(d)) => (s.octets().to_vec(), d.octets().to_vec()),
+    };
 
-    // Key IS the RawPacket itself since it derives Hash/Eq
-    let mut map: HashMap<RawPacket, i32> = HashMap::new();
-
-    for p in packets {
-        map.entry(p.clone())
-           .and_modify(|size| *size += p.size)
-           .or_insert(p.size);
-    }
-
-    let packets = map.into_iter().map(|(k, total_size)| {
-        let (src_ip_bytes, dst_ip_bytes) = match (k.src_ip, k.dst_ip) {
-            (IpAddr::V4(s), IpAddr::V4(d)) => (s.octets().to_vec(), d.octets().to_vec()),
-            (IpAddr::V6(s), IpAddr::V6(d)) => (s.octets().to_vec(), d.octets().to_vec()),
-            (IpAddr::V4(s), IpAddr::V6(d)) => (s.octets().to_vec(), d.octets().to_vec()), // Should not happen usually but valid
-            (IpAddr::V6(s), IpAddr::V4(d)) => (s.octets().to_vec(), d.octets().to_vec()),
-        };
-
-        Packet {
-            src_ip: src_ip_bytes,
-            dst_ip: dst_ip_bytes,
-            src_is_agent: k.src_is_agent,
-            dst_is_agent: k.dst_is_agent,
-            size: total_size,
-            proto: k.proto,
-            src_port: k.src_port,
-            dst_port: k.dst_port,
-        }
-    }).collect();
-
-    packet::PacketBatch {
-        packets
+    Packet {
+        src_ip: src_ip_bytes,
+        dst_ip: dst_ip_bytes,
+        src_is_agent: key.src_is_agent,
+        dst_is_agent: key.dst_is_agent,
+        size,
+        proto: key.proto,
+        src_port: key.src_port,
+        dst_port: key.dst_port,
     }
 }
 
-fn run_live_capture(args: Args, tx: mpsc::Sender<Vec<RawPacket>>, server_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn flush_buffer(buffer: &mut HashMap<FlowKey, i32>, tx: &mpsc::Sender<Vec<Packet>>) -> bool {
+    let mut packets = Vec::with_capacity(buffer.len());
+    for (key, size) in buffer.drain() {
+        packets.push(packet_from_key(key, size));
+    }
+    
+    if packets.is_empty() {
+        return true;
+    }
+
+    if let Err(_) = tx.blocking_send(packets) {
+         return false;
+    }
+    true
+}
+
+async fn flush_buffer_async(buffer: &mut HashMap<FlowKey, i32>, tx: &mpsc::Sender<Vec<Packet>>) -> bool {
+    let mut packets = Vec::with_capacity(buffer.len());
+    for (key, size) in buffer.drain() {
+        packets.push(packet_from_key(key, size));
+    }
+    
+    if packets.is_empty() {
+        return true;
+    }
+
+    if tx.send(packets).await.is_err() {
+        return false;
+    }
+    true
+}
+
+fn run_live_capture(args: Args, tx: mpsc::Sender<Vec<Packet>>, server_port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cap = Capture::from_device(args.device.as_str())?
         .promisc(args.promiscuous)
         .snaplen(args.snapshot)
-        .timeout(100) // Lower pcap timeout to allow frequent flush checks
+        .timeout(100)
         .open()?;
 
     // Set BPF filter
@@ -233,23 +249,21 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Vec<RawPacket>>, server_port: u
 
     let datalink = cap.get_datalink();
     
-    // Local buffer for micro-batching
-    let mut buffer: Vec<RawPacket> = Vec::with_capacity(args.batch_size);
+    // Local buffer for pre-aggregation
+    let mut buffer: HashMap<FlowKey, i32> = HashMap::with_capacity(args.batch_size);
     let mut last_flush = std::time::Instant::now();
     let flush_interval = std::time::Duration::from_millis(args.batch_interval);
 
     loop {
-        // Check flush timer at start of loop (in case we looped from a packet)
+        // Check flush timer
         if !buffer.is_empty() && last_flush.elapsed() >= flush_interval {
-             if let Err(_) = tx.blocking_send(buffer) {
-                return Ok(());
+             if !flush_buffer(&mut buffer, &tx) {
+                 return Ok(());
              }
-             buffer = Vec::with_capacity(args.batch_size);
              last_flush = std::time::Instant::now();
         }
 
-        // We need a way to check if channel is closed to stop capture, 
-        // but pcap blocks. The timeout(100) helps us yield.
+        // Check if channel closed
         if tx.is_closed() {
             return Ok(());
         }
@@ -322,32 +336,30 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Vec<RawPacket>>, server_port: u
                             }
                         }
 
-                        let info = RawPacket {
+                        let key = FlowKey {
                             src_ip,
                             dst_ip,
                             src_is_agent,
                             dst_is_agent,
-                            size: packet.header.len as i32,
                             proto: proto.into(),
                             src_port,
                             dst_port,
                         };
 
-                        buffer.push(info);
+                        // Aggregate
+                        *buffer.entry(key).or_insert(0) += packet.header.len as i32;
                         
-                        // Buffer full check
+                        // Buffer full check (soft limit based on entry count to avoid huge maps)
                         if buffer.len() >= args.batch_size {
-                            if let Err(_) = tx.blocking_send(buffer) {
-                                return Ok(()); // channel closed
+                            if !flush_buffer(&mut buffer, &tx) {
+                                return Ok(());
                             }
-                            buffer = Vec::with_capacity(args.batch_size);
                             last_flush = std::time::Instant::now();
                         }
                     }
                 }
             },
             Err(pcap::Error::TimeoutExpired) => {
-                // Just continue to loop top to check flush timer
                 continue;
             },
             Err(e) => {
@@ -357,8 +369,7 @@ fn run_live_capture(args: Args, tx: mpsc::Sender<Vec<RawPacket>>, server_port: u
     }
 }
 
-async fn generate_mock_traffic(tx: mpsc::Sender<Vec<RawPacket>>, batch_size: usize) {
-    // 192.168.1.10, .20, 10.0.0.5, 172.16.0.3
+async fn generate_mock_traffic(tx: mpsc::Sender<Vec<Packet>>, batch_size: usize, batch_interval: u64) {
     let peers = vec![
         IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)), 
         IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 20)), 
@@ -370,11 +381,20 @@ async fn generate_mock_traffic(tx: mpsc::Sender<Vec<RawPacket>>, batch_size: usi
     let mut rng = rand::thread_rng();
     use rand::Rng;
 
-    let mut buffer: Vec<RawPacket> = Vec::with_capacity(batch_size);
+    let mut buffer: HashMap<FlowKey, i32> = HashMap::with_capacity(batch_size);
+    let mut last_flush = std::time::Instant::now();
+    let flush_interval = std::time::Duration::from_millis(batch_interval);
 
     loop {
-        // High speed mock
-        let delay = rng.gen_range(0..5); // Faster!
+        // Mock flush timer
+        if last_flush.elapsed() >= flush_interval {
+            if !buffer.is_empty() {
+                if !flush_buffer_async(&mut buffer, &tx).await { return; }
+            }
+            last_flush = std::time::Instant::now();
+        }
+
+        let delay = rng.gen_range(0..2); 
         if delay > 0 {
              sleep(Duration::from_millis(delay)).await;
         }
@@ -393,24 +413,21 @@ async fn generate_mock_traffic(tx: mpsc::Sender<Vec<RawPacket>>, batch_size: usi
         if src == localhost { src_is_agent = true; }
         if dst == localhost { dst_is_agent = true; }
 
-        let info = RawPacket {
+        let key = FlowKey {
             src_ip: src,
             dst_ip: dst,
             src_is_agent,
             dst_is_agent,
-            size: rng.gen_range(64..1000),
             proto: packet::Protocol::Tcp.into(),
             src_port: 0,
             dst_port: 0,
         };
         
-        buffer.push(info);
+        *buffer.entry(key).or_insert(0) += rng.gen_range(64..1500);
         
         if buffer.len() >= batch_size {
-            if tx.send(buffer).await.is_err() {
-                return;
-            }
-            buffer = Vec::with_capacity(batch_size);
+            if !flush_buffer_async(&mut buffer, &tx).await { return; }
+            last_flush = std::time::Instant::now();
         }
     }
 }
