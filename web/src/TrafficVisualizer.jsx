@@ -1,13 +1,11 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { OrbitControls, Text, PerspectiveCamera, Sparkles, Grid, Html } from '@react-three/drei';
-import { EffectComposer, Bloom, Vignette, Scanline } from '@react-three/postprocessing';
+import { OrbitControls, Text, PerspectiveCamera, Grid } from '@react-three/drei';
+
 import * as THREE from 'three';
 
 // --- Constants ---
 const PEER_RADIUS = 15;
-const TRAFFIC_SPEED = 0.5;
-// const PEER_TIMEOUT = 60000; // 1 minute (Moved to Config)
 const AGENT_CLUSTER_RADIUS = 4; // Radius for multiple agents
 
 // --- Helper: Generate Position on Circle ---
@@ -339,7 +337,7 @@ function ConnectionLink({ linkData, maxThreshold = 10000 }) {
 
       ref.current.material.color = color;
       ref.current.material.emissive = color;
-      ref.current.material.emissiveIntensity = 1 + ratio * 10;
+      ref.current.material.emissiveIntensity = 1 + ratio * 2;
     }
   });
 
@@ -464,18 +462,19 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled
 
       <div><strong>IP:</strong> {targetIp}</div>
       {/* For Agent, maybe we don't have volume/protocols logic wired up effectively yet in visualizer state for 'agentsRef' */}
-      {!isAgent && peerData && (
-        <div><strong>First Seen:</strong> {peerData.firstSeen ? new Date(peerData.firstSeen).toLocaleTimeString() : 'N/A'}</div>
-      )}
+      <div><strong>First Seen:</strong> {(peerData || agentData)?.firstSeen ? new Date((peerData || agentData).firstSeen).toLocaleTimeString() : 'N/A'}</div>
       <div><strong>Last Seen:</strong> {new Date((peerData || agentData)?.lastSeen).toLocaleTimeString()}</div>
 
-      {!isAgent && (
-        <>
-          <div><strong>Speed:</strong> {peerData?.currentSpeed ? (peerData.currentSpeed / 1024).toFixed(2) : '0.00'} KB/s</div>
-          <div><strong>Protocols:</strong> {peerData?.protocols ? Array.from(peerData.protocols).join(', ') : 'N/A'}</div>
-          <div><strong>Ports:</strong> {renderPorts(peerData)}</div>
-        </>
-      )}
+      <>
+        <div><strong>Speed IN:</strong> {(peerData || agentData)?.currentSpeedIn ? ((peerData || agentData).currentSpeedIn / 1024).toFixed(2) : '0.00'} KB/s</div>
+        <div><strong>Speed OUT:</strong> {(peerData || agentData)?.currentSpeedOut ? ((peerData || agentData).currentSpeedOut / 1024).toFixed(2) : '0.00'} KB/s</div>
+        {!isAgent && (
+          <>
+            <div><strong>Protocols:</strong> {peerData?.protocols ? Array.from(peerData.protocols).join(', ') : 'N/A'}</div>
+            <div><strong>Ports:</strong> {renderPorts(peerData)}</div>
+          </>
+        )}
+      </>
 
       {isAgent && (
         <div style={{ marginTop: '10px', fontStyle: 'italic', color: '#cccc00' }}>
@@ -533,8 +532,7 @@ function InfoPanel({ peerIp, peerData, agentIp, agentData, onClose, geoipEnabled
 
 
 import { retry, delay, repeat } from 'rxjs/operators';
-import { timer } from 'rxjs';
-import { AgentServiceClientImpl, Empty, GrpcWebImpl, PacketType, Protocol, protocolToJSON } from './proto/packet';
+import { AgentServiceClientImpl, Empty, GrpcWebImpl, protocolToJSON } from './proto/packet';
 
 export default function TrafficVisualizer() {
   // useRefs for data (Source of Truth)
@@ -630,15 +628,43 @@ export default function TrafficVisualizer() {
                     agentsRef.current[ip] = {
                       ip: ip,
                       lastSeen: timestamp,
-                      position: new THREE.Vector3(0, 2, 0) // Default
+                      firstSeen: timestamp,
+                      position: new THREE.Vector3(0, 2, 0), // Default
+                      speedHistoryIn: [],
+                      speedHistoryOut: [],
+                      currentSpeedIn: 0,
+                      currentSpeedOut: 0
                     };
                   } else {
                     agentsRef.current[ip].lastSeen = timestamp;
                   }
                 };
 
-                if (data.srcIsAgent) registerAgent(srcIp);
-                if (data.dstIsAgent) registerAgent(dstIp);
+                const updateAgentStats = (ip, role, dataPacket) => {
+                  if (!ip || isLoopback(ip) || ip === "AGENT") return;
+                  const agent = agentsRef.current[ip];
+                  if (!agent) return;
+
+                  // Init stats if missing (migration/safety)
+                  if (!agent.speedHistoryIn) agent.speedHistoryIn = [];
+                  if (!agent.speedHistoryOut) agent.speedHistoryOut = [];
+                  if (!agent.firstSeen) agent.firstSeen = timestamp;
+
+                  if (role === 'src') {
+                    agent.speedHistoryOut.push({ t: timestamp, s: dataPacket.size });
+                  } else {
+                    agent.speedHistoryIn.push({ t: timestamp, s: dataPacket.size });
+                  }
+                };
+
+                if (data.srcIsAgent) {
+                  registerAgent(srcIp);
+                  updateAgentStats(srcIp, 'src', data);
+                }
+                if (data.dstIsAgent) {
+                  registerAgent(dstIp);
+                  updateAgentStats(dstIp, 'dst', data);
+                }
 
                 // Update Peers
                 const currentPeers = peersRef.current;
@@ -655,8 +681,10 @@ export default function TrafficVisualizer() {
                       lastSeen: timestamp,
                       firstSeen: timestamp,
                       volume: 0, // This is decayed volume for visualization size/heat
-                      speedHistory: [], // { t: number, s: number } for exact speed calc
-                      currentSpeed: 0,
+                      speedHistoryIn: [], // { t: number, s: number }
+                      speedHistoryOut: [], // { t: number, s: number }
+                      currentSpeedIn: 0,
+                      currentSpeedOut: 0,
                       protocols: new Set(),
                       portsIn: new Set(),
                       portsOut: new Set()
@@ -668,15 +696,18 @@ export default function TrafficVisualizer() {
                   if (currentPeers[ip]) {
                     currentPeers[ip].volume += data.size;
 
-                    // Add to speed history
-                    currentPeers[ip].speedHistory.push({ t: timestamp, s: data.size });
-
-                    if (data.proto) currentPeers[ip].protocols.add(protocolToJSON(data.proto));
+                    // Add to speed history based on ROLE
+                    // If role is 'src', this peer SENT data -> Outbound
+                    // If role is 'dst', this peer RECEIVED data -> Inbound
                     if (role === 'src') {
+                      currentPeers[ip].speedHistoryOut.push({ t: timestamp, s: data.size });
                       if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsOut.add(data.dstPort);
                     } else {
+                      currentPeers[ip].speedHistoryIn.push({ t: timestamp, s: data.size });
                       if (data.dstPort && data.dstPort !== 0) currentPeers[ip].portsIn.add(data.dstPort);
                     }
+
+                    if (data.proto) currentPeers[ip].protocols.add(protocolToJSON(data.proto));
                     if (currentPeers[ip].protocols.size > 5) currentPeers[ip].protocols = new Set(Array.from(currentPeers[ip].protocols).slice(-5));
                     if (currentPeers[ip].portsIn.size > 5) currentPeers[ip].portsIn = new Set(Array.from(currentPeers[ip].portsIn).slice(-5));
                     if (currentPeers[ip].portsOut.size > 5) currentPeers[ip].portsOut = new Set(Array.from(currentPeers[ip].portsOut).slice(-5));
@@ -767,6 +798,36 @@ export default function TrafficVisualizer() {
         setAgentsState({ ...currentAgents });
       }
 
+      // --- Calculate Agent Speeds ---
+      agentIPs.forEach(key => {
+        const agent = currentAgents[key];
+        // Speed Calculation (Last 1000ms) - IN
+        if (agent.speedHistoryIn) {
+          const cutoff = now - 1000;
+          let startIndex = 0;
+          while (startIndex < agent.speedHistoryIn.length && agent.speedHistoryIn[startIndex].t < cutoff) {
+            startIndex++;
+          }
+          if (startIndex > 0) {
+            agent.speedHistoryIn.splice(0, startIndex);
+          }
+          agent.currentSpeedIn = agent.speedHistoryIn.reduce((acc, item) => acc + item.s, 0);
+        }
+
+        // Speed Calculation (Last 1000ms) - OUT
+        if (agent.speedHistoryOut) {
+          const cutoff = now - 1000;
+          let startIndex = 0;
+          while (startIndex < agent.speedHistoryOut.length && agent.speedHistoryOut[startIndex].t < cutoff) {
+            startIndex++;
+          }
+          if (startIndex > 0) {
+            agent.speedHistoryOut.splice(0, startIndex);
+          }
+          agent.currentSpeedOut = agent.speedHistoryOut.reduce((acc, item) => acc + item.s, 0);
+        }
+      });
+
 
       // --- Update Peers ---
       const currentPeers = peersRef.current;
@@ -777,20 +838,30 @@ export default function TrafficVisualizer() {
         const peer = currentPeers[key];
         peer.volume *= 0.8;
 
-        // Speed Calculation (Last 1000ms)
-        if (peer.speedHistory) {
-          // Prune old history
+        // Speed Calculation (Last 1000ms) - IN
+        if (peer.speedHistoryIn) {
           const cutoff = now - 1000;
           let startIndex = 0;
-          while (startIndex < peer.speedHistory.length && peer.speedHistory[startIndex].t < cutoff) {
+          while (startIndex < peer.speedHistoryIn.length && peer.speedHistoryIn[startIndex].t < cutoff) {
             startIndex++;
           }
           if (startIndex > 0) {
-            peer.speedHistory.splice(0, startIndex);
+            peer.speedHistoryIn.splice(0, startIndex);
           }
+          peer.currentSpeedIn = peer.speedHistoryIn.reduce((acc, item) => acc + item.s, 0);
+        }
 
-          // Calculate sum
-          peer.currentSpeed = peer.speedHistory.reduce((acc, item) => acc + item.s, 0);
+        // Speed Calculation (Last 1000ms) - OUT
+        if (peer.speedHistoryOut) {
+          const cutoff = now - 1000;
+          let startIndex = 0;
+          while (startIndex < peer.speedHistoryOut.length && peer.speedHistoryOut[startIndex].t < cutoff) {
+            startIndex++;
+          }
+          if (startIndex > 0) {
+            peer.speedHistoryOut.splice(0, startIndex);
+          }
+          peer.currentSpeedOut = peer.speedHistoryOut.reduce((acc, item) => acc + item.s, 0);
         }
 
         // Skip timeout for selected peer
