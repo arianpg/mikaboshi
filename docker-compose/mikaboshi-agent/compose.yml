@@ -11,4 +11,6 @@ services:
       #- MIKABOSHI_AGENT_PROMISCUOUS=false
       #- MIKABOSHI_AGENT_IPV6=false
       #- MIKABOSHI_AGENT_MOCK=false
+      #- MIKABOSHI_AGENT_BATCH_SIZE=50000
+      #- MIKABOSHI_AGENT_BATCH_INTERVAL=100
     restart: unless-stopped
